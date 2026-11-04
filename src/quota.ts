@@ -185,21 +185,22 @@ export class QuotaService {
     });
   }
 
-  public formatResetCompact(isoStr?: string): string {
+  public formatResetCompact(isoStr?: string, nbsp = false): string {
     if (!isoStr) return '';
     const diff = new Date(isoStr).getTime() - Date.now();
     if (diff <= 0) return 'now';
+    const space = nbsp ? '&nbsp;' : ' ';
     const mins = Math.floor(diff / 60000);
     if (mins < 60) return `${mins}m`;
     const hours = Math.floor(mins / 60);
     const remMins = mins % 60;
-    if (hours < 24) return `${hours}h ${remMins}m`;
+    if (hours < 24) return `${hours}h${space}${remMins}m`;
     const days = Math.floor(hours / 24);
     const remHours = hours % 24;
-    return `${days}d ${remHours}h`;
+    return `${days}d${space}${remHours}h`;
   }
 
-  public parseMetrics(quota: QuotaSummary | null): CachedQuotaMetric {
+  public parseMetrics(quota: QuotaSummary | null, nbsp = false): CachedQuotaMetric {
     if (!quota || !quota.groups || quota.groups.length === 0) {
       return {
         plan: '—',
@@ -210,6 +211,8 @@ export class QuotaService {
       };
     }
 
+    const space = nbsp ? '&nbsp;' : ' ';
+    const dot = nbsp ? '&nbsp;·&nbsp;' : ' · ';
     const plan = quota.hasArgonGroup ? 'Pro' : 'Ultra';
     let gemini = '—';
     let claudeGpt = '—';
@@ -221,15 +224,15 @@ export class QuotaService {
         const b = group.buckets[0];
         if (b) {
           const pct = Math.round((b.remainingFraction || 0) * 100);
-          const r = this.formatResetCompact(b.resetTime);
-          argon = `${pct}%` + (r ? ` (${r})` : '');
+          const r = this.formatResetCompact(b.resetTime, nbsp);
+          argon = `${pct}%` + (r ? `${space}(${r})` : '');
         }
       } else if (name.includes('claude') || name.includes('gpt')) {
         const weekly = group.buckets.find((b) => b.window === 'weekly') || group.buckets[0];
         if (weekly) {
           const pct = Math.round((weekly.remainingFraction || 0) * 100);
-          const r = this.formatResetCompact(weekly.resetTime);
-          claudeGpt = `${pct}%` + (r ? ` (${r})` : '');
+          const r = this.formatResetCompact(weekly.resetTime, nbsp);
+          claudeGpt = `${pct}%` + (r ? `${space}(${r})` : '');
         }
       } else if (name.includes('gemini')) {
         const b5h = group.buckets.find((b) => b.window === '5h');
@@ -237,9 +240,9 @@ export class QuotaService {
         const p5h = b5h ? `${Math.round((b5h.remainingFraction || 0) * 100)}%` : null;
         const pWk = bWeekly ? `${Math.round((bWeekly.remainingFraction || 0) * 100)}%` : null;
         if (p5h && pWk) {
-          gemini = `${p5h} (5h) · ${pWk} (7d)`;
+          gemini = `${p5h}${space}(5h)${dot}${pWk}${space}(7d)`;
         } else if (pWk) {
-          gemini = `${pWk} (7d)`;
+          gemini = `${pWk}${space}(7d)`;
         }
       }
     }
@@ -254,13 +257,17 @@ export class QuotaService {
   }
 
   public getQuickSummaryLine(quota: QuotaSummary | null): string {
-    const m = this.parseMetrics(quota);
+    const m = this.parseMetrics(quota, false);
     if (m.plan === '—') return '';
     const parts = [`Gemini: ${m.gemini}`, `Claude/GPT: ${m.claudeGpt}`];
     if (m.argon !== 'included' && m.argon !== '—') {
       parts.push(`Argon: ${m.argon}`);
     }
     return parts.join(' | ');
+  }
+
+  private padTableCell(content: string): string {
+    return `&nbsp;${content}&nbsp;`;
   }
 
   public buildAccountsHoverTooltip(
@@ -270,8 +277,16 @@ export class QuotaService {
     liveQuota: QuotaSummary | null
   ): vscode.MarkdownString {
     const md = new vscode.MarkdownString();
-    md.isTrusted = true;
-    md.supportHtml = false;
+    md.supportThemeIcons = true;
+    md.supportHtml = true;
+    md.isTrusted = {
+      enabledCommands: [
+        'charlier.switchProfileDirect',
+        'charlier.switchProfile',
+        'charlier.refreshQuota',
+        'charlier.addAccount'
+      ]
+    };
 
     md.appendMarkdown(`### Antigravity accounts\n\n`);
 
@@ -281,11 +296,21 @@ export class QuotaService {
       return md;
     }
 
-    // Markdown table
-    md.appendMarkdown(`| | Profile | Plan | Gemini | Claude & GPT | Argon |\n`);
-    md.appendMarkdown(`|:--:|:---|:--:|:---|:---|:---|\n`);
+    // High-contrast clean table matching native VS Code layout
+    const headers = [
+      this.padTableCell(''),
+      this.padTableCell('Profile'),
+      this.padTableCell('Plan'),
+      this.padTableCell('Gemini'),
+      this.padTableCell('Claude/GPT'),
+      this.padTableCell('Argon')
+    ];
+    const separators = [':---:', ':---', ':---:', ':---:', ':---:', ':---:'];
 
-    const liveMetrics = this.parseMetrics(liveQuota);
+    md.appendMarkdown(`| ${headers.join(' | ')} |\n`);
+    md.appendMarkdown(`|${separators.join('|')}|\n`);
+
+    const liveMetrics = this.parseMetrics(liveQuota, true);
 
     // List all profiles
     for (const p of profiles) {
@@ -293,24 +318,41 @@ export class QuotaService {
         p.id === activeProfileId ||
         (liveEmail && p.email.toLowerCase() === liveEmail.toLowerCase());
 
-      const icon = isActive ? `$(pass-filled~charts-green)` : `$(circle-outline)`;
-      const name = isActive
-        ? `**${p.name}**`
-        : `[${p.name}](command:charlier.switchProfileDirect?%22${encodeURIComponent(p.id)}%22)`;
+      const status = isActive ? '$(check)' : '';
+      const switchUri = `command:charlier.switchProfileDirect?${encodeURIComponent(JSON.stringify(p.id))}`;
+      const linkTitle = p.email ? p.email.replace(/"/g, '\\"') : '';
+      const linkedName = isActive
+        ? `[**${p.name}**](${switchUri} "${linkTitle}")`
+        : `[${p.name}](${switchUri} "${linkTitle}")`;
 
       const metrics = isActive ? liveMetrics : p.cachedQuota || { plan: '—', gemini: '—', claudeGpt: '—', argon: '—' };
 
-      md.appendMarkdown(
-        `| ${icon} | ${name} | ${metrics.plan} | ${metrics.gemini} | ${metrics.claudeGpt} | ${metrics.argon} |\n`
-      );
+      const cells = [
+        this.padTableCell(status),
+        this.padTableCell(linkedName),
+        this.padTableCell(metrics.plan),
+        this.padTableCell(metrics.gemini),
+        this.padTableCell(metrics.claudeGpt),
+        this.padTableCell(metrics.argon)
+      ];
+
+      md.appendMarkdown(`| ${cells.join(' | ')} |\n`);
     }
 
     // If live session is not yet saved as a profile
     if (liveEmail && !profiles.some((p) => p.email.toLowerCase() === liveEmail.toLowerCase())) {
       const short = liveEmail.split('@')[0];
-      md.appendMarkdown(
-        `| $(pass-filled~charts-green) | *${short} (unsaved)* | ${liveMetrics.plan} | ${liveMetrics.gemini} | ${liveMetrics.claudeGpt} | ${liveMetrics.argon} |\n`
-      );
+      const status = '$(check)';
+      const name = `*${short} (unsaved)*`;
+      const cells = [
+        this.padTableCell(status),
+        this.padTableCell(name),
+        this.padTableCell(liveMetrics.plan),
+        this.padTableCell(liveMetrics.gemini),
+        this.padTableCell(liveMetrics.claudeGpt),
+        this.padTableCell(liveMetrics.argon)
+      ];
+      md.appendMarkdown(`| ${cells.join(' | ')} |\n`);
     }
 
     md.appendMarkdown(`\n---\n\n`);

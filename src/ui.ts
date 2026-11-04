@@ -46,7 +46,7 @@ export class UIController {
     }
 
     if (activeProfile) {
-      this.statusBarItem.text = `$(pass-filled~charts-green) Charlier: ${activeProfile.name}`;
+      this.statusBarItem.text = `$(arrow-swap) Charlier: ${activeProfile.name}`;
       this.statusBarItem.tooltip = this.quotaService.buildAccountsHoverTooltip(
         profiles,
         activeProfile.id,
@@ -54,7 +54,7 @@ export class UIController {
         null
       );
     } else if (live.email) {
-      this.statusBarItem.text = `$(arrow-swap~charts-blue) Charlier: ${this.truncate(live.email, 18)}`;
+      this.statusBarItem.text = `$(arrow-swap) Charlier: ${this.truncate(live.email, 18)}`;
       this.statusBarItem.tooltip = this.quotaService.buildAccountsHoverTooltip(
         profiles,
         null,
@@ -169,19 +169,22 @@ export class UIController {
         if (isActive) {
           buttons = [graphBtn, editBtn];
           if (liveMetrics.plan !== '—') {
-            const argonPart = liveMetrics.argon !== '—' && liveMetrics.argon !== 'included' ? ` · Argon: ${liveMetrics.argon}` : '';
-            detailText = `${liveMetrics.plan} · Gemini: ${liveMetrics.gemini} · Claude/GPT: ${liveMetrics.claudeGpt}${argonPart}`;
+            const argonPart = liveMetrics.argon !== '—' && liveMetrics.argon !== 'included' ? ` · Argon: ${liveMetrics.argon.replace(/&nbsp;/g, ' ')}` : '';
+            detailText = `${liveMetrics.plan} · Gemini: ${liveMetrics.gemini.replace(/&nbsp;/g, ' ')} · Claude/GPT: ${liveMetrics.claudeGpt.replace(/&nbsp;/g, ' ')}${argonPart}`;
           } else {
             detailText = 'Active account';
           }
         } else if (profile.cachedQuota) {
           const q = profile.cachedQuota;
-          const argonPart = q.argon !== '—' && q.argon !== 'included' ? ` · Argon: ${q.argon}` : '';
-          detailText = `${q.plan} · Gemini: ${q.gemini}${argonPart}`;
+          const argonPart = q.argon !== '—' && q.argon !== 'included' ? ` · Argon: ${q.argon.replace(/&nbsp;/g, ' ')}` : '';
+          detailText = `${q.plan} · Gemini: ${q.gemini.replace(/&nbsp;/g, ' ')}${argonPart}`;
         }
 
         items.push({
-          label: `${isActive ? '$(pass-filled~charts-green) ' : '$(circle-outline) '}${profile.name}`,
+          label: profile.name,
+          iconPath: isActive
+            ? new vscode.ThemeIcon('check', new vscode.ThemeColor('charts.green'))
+            : new vscode.ThemeIcon('circle-outline'),
           description: profile.email + (isActive ? ' · Active' : ''),
           detail: detailText,
           actionType: 'switch',
@@ -200,34 +203,39 @@ export class UIController {
     });
 
     items.push({
-      label: '$(add) Add new account',
+      label: 'Add new account',
       description: 'Prepare new Google sign-in',
+      iconPath: new vscode.ThemeIcon('add'),
       actionType: 'add'
     });
 
     items.push({
-      label: '$(save) Save session as profile',
+      label: 'Save session as profile',
       description: live.email ? `Snapshot "${live.email}"` : 'Snapshot current credentials',
+      iconPath: new vscode.ThemeIcon('save'),
       actionType: 'save'
     });
 
     if (profiles.length > 0) {
       items.push({
-        label: '$(trash) Delete profile',
+        label: 'Delete profile',
         description: 'Remove saved profile from vault',
+        iconPath: new vscode.ThemeIcon('trash'),
         actionType: 'delete'
       });
     }
 
     items.push({
-      label: '$(folder) Open vault folder',
+      label: 'Open vault folder',
       description: 'Reveal ~/.gemini/charlier/',
+      iconPath: new vscode.ThemeIcon('folder'),
       actionType: 'open'
     });
 
     items.push({
-      label: '$(refresh) Reload window',
+      label: 'Reload window',
       description: 'Restart language server and reload VS Code',
+      iconPath: new vscode.ThemeIcon('refresh'),
       actionType: 'reload'
     });
 
@@ -290,25 +298,28 @@ export class UIController {
     if (!profile) return;
 
     vscode.window.setStatusBarMessage(
-      `$(pass-filled~charts-green) "${profile.name}" is already the active profile.`,
+      `$(check) "${profile.name}" is already the active profile.`,
       3000
     );
 
     const choice = await vscode.window.showQuickPick(
       [
         {
-          label: '$(graph) View quota details',
+          label: 'View quota details',
           description: 'Detailed 5-hour and weekly limits across all model pools',
+          iconPath: new vscode.ThemeIcon('graph'),
           action: 'quota'
         },
         {
-          label: '$(edit) Rename profile',
+          label: 'Rename profile',
           description: `Change label for "${profile.name}"`,
+          iconPath: new vscode.ThemeIcon('edit'),
           action: 'rename'
         },
         {
-          label: '$(refresh) Refresh limits',
+          label: 'Refresh limits',
           description: 'Query live daemon for updated token limits',
+          iconPath: new vscode.ThemeIcon('refresh'),
           action: 'refresh'
         }
       ],
@@ -337,7 +348,7 @@ export class UIController {
 
     if (isAlreadyActive) {
       vscode.window.setStatusBarMessage(
-        `$(pass-filled~charts-green) "${target?.name || profileId}" is already active.`,
+        `$(check) "${target?.name || profileId}" is already active.`,
         3000
       );
       return;
@@ -349,7 +360,7 @@ export class UIController {
       await this.update();
 
       vscode.window.setStatusBarMessage(
-        `$(pass-filled~charts-green) Switched to profile "${meta.name}"`,
+        `$(check) Switched to profile "${meta.name}"`,
         4000
       );
 
@@ -383,7 +394,7 @@ export class UIController {
       this.vault.renameProfile(profileId, newName.trim());
       await this.update();
       vscode.window.setStatusBarMessage(
-        `$(check~charts-green) Renamed profile to "${newName.trim()}"`,
+        `$(check) Renamed profile to "${newName.trim()}"`,
         3000
       );
     } catch (err: any) {
@@ -413,7 +424,7 @@ export class UIController {
       this.quotaService.invalidate();
       await this.update();
       vscode.window.setStatusBarMessage(
-        `$(pass-filled~charts-green) Saved profile "${meta.name}" for ${meta.email}`,
+        `$(check) Saved profile "${meta.name}" for ${meta.email}`,
         4000
       );
     } catch (err: any) {

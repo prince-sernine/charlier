@@ -41,8 +41,12 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('charlier.switchProfile', async () => {
       await uiController?.showQuickPickMenu();
     }),
-    vscode.commands.registerCommand('charlier.switchProfileDirect', async (profileId: any) => {
-      const idStr = typeof profileId === 'string' ? decodeURIComponent(profileId) : String(profileId || '');
+    vscode.commands.registerCommand('charlier.switchProfileDirect', async (arg: any) => {
+      let rawId = arg;
+      if (Array.isArray(arg) && arg.length > 0) {
+        rawId = arg[0];
+      }
+      const idStr = typeof rawId === 'string' ? decodeURIComponent(rawId) : String(rawId || '');
       if (idStr) {
         await uiController?.handleSwitch(idStr);
       }
