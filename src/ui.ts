@@ -45,21 +45,23 @@ export class UIController {
       ) || null;
     }
 
+    const cachedQuota = this.quotaService.getCachedSummary();
+
     if (activeProfile) {
-      this.statusBarItem.text = `$(arrow-swap) Charlier: ${activeProfile.name}`;
+      this.statusBarItem.text = `$(layers) Charlier: ${activeProfile.name}`;
       this.statusBarItem.tooltip = this.quotaService.buildAccountsHoverTooltip(
         profiles,
         activeProfile.id,
         live.email,
-        null
+        cachedQuota
       );
     } else if (live.email) {
-      this.statusBarItem.text = `$(arrow-swap) Charlier: ${this.truncate(live.email, 18)}`;
+      this.statusBarItem.text = `$(layers) Charlier: ${this.truncate(live.email, 18)}`;
       this.statusBarItem.tooltip = this.quotaService.buildAccountsHoverTooltip(
         profiles,
         null,
         live.email,
-        null
+        cachedQuota
       );
     } else {
       this.statusBarItem.text = `$(account) Charlier: Ready for login`;
@@ -126,12 +128,9 @@ export class UIController {
     const state = this.vault.getState();
     const profiles = this.vault.listProfiles();
 
-    let liveQuota: QuotaSummary | null = null;
-    try {
-      liveQuota = await this.quotaService.getQuotaSummary();
-    } catch {}
-
-    const liveMetrics = this.quotaService.parseMetrics(liveQuota);
+    // Synchronous immediate open with cached quota - zero lag on click
+    let liveQuota: QuotaSummary | null = this.quotaService.getCachedSummary();
+    let liveMetrics = this.quotaService.parseMetrics(liveQuota);
 
     const graphBtn: vscode.QuickInputButton = {
       iconPath: new vscode.ThemeIcon('graph'),
@@ -148,98 +147,110 @@ export class UIController {
     quickPick.matchOnDescription = true;
     quickPick.matchOnDetail = true;
 
-    const items: CharlierQuickPickItem[] = [];
+    const buildItems = (metrics: CachedQuotaMetric): CharlierQuickPickItem[] => {
+      const result: CharlierQuickPickItem[] = [];
 
-    // 1. Profiles Section
-    if (profiles.length > 0) {
-      items.push({
-        label: 'Profiles',
+      // 1. Profiles Section
+      if (profiles.length > 0) {
+        result.push({
+          label: 'Profiles',
+          kind: vscode.QuickPickItemKind.Separator,
+          actionType: 'switch'
+        });
+
+        for (const profile of profiles) {
+          const isActive =
+            state.activeProfileId === profile.id ||
+            (live.email && profile.email.toLowerCase() === live.email.toLowerCase());
+
+          let detailText = 'Click to activate';
+          let buttons: vscode.QuickInputButton[] = [editBtn];
+
+          if (isActive) {
+            buttons = [graphBtn, editBtn];
+            if (metrics.plan !== '—') {
+              const argonPart = metrics.argon !== '—' && metrics.argon !== 'incl.' ? ` · Argon: ${metrics.argon}` : '';
+              detailText = `${metrics.plan} · Gemini: ${metrics.gemini} · Claude: ${metrics.claudeGpt}${argonPart}`;
+            } else {
+              detailText = 'Active account';
+            }
+          } else if (profile.cachedQuota) {
+            const q = profile.cachedQuota;
+            const argonPart = q.argon !== '—' && q.argon !== 'incl.' ? ` · Argon: ${q.argon}` : '';
+            detailText = `${q.plan} · Gemini: ${q.gemini} · Claude: ${q.claudeGpt}${argonPart}`;
+          }
+
+          result.push({
+            label: profile.name,
+            iconPath: isActive
+              ? new vscode.ThemeIcon('check', new vscode.ThemeColor('charts.green'))
+              : new vscode.ThemeIcon('account'),
+            description: profile.email + (isActive ? ' · Active' : ''),
+            detail: detailText,
+            actionType: 'switch',
+            profileId: profile.id,
+            isCurrentActive: isActive,
+            buttons
+          });
+        }
+      }
+
+      // 2. Actions Section
+      result.push({
+        label: 'Actions',
         kind: vscode.QuickPickItemKind.Separator,
-        actionType: 'switch'
+        actionType: 'save'
       });
 
-      for (const profile of profiles) {
-        const isActive =
-          state.activeProfileId === profile.id ||
-          (live.email && profile.email.toLowerCase() === live.email.toLowerCase());
+      result.push({
+        label: 'Add new account',
+        description: 'Prepare new Google sign-in',
+        iconPath: new vscode.ThemeIcon('add'),
+        actionType: 'add'
+      });
 
-        let detailText = 'Click to activate';
-        let buttons: vscode.QuickInputButton[] = [editBtn];
+      result.push({
+        label: 'Save session as profile',
+        description: live.email ? `Snapshot "${live.email}"` : 'Snapshot current credentials',
+        iconPath: new vscode.ThemeIcon('save'),
+        actionType: 'save'
+      });
 
-        if (isActive) {
-          buttons = [graphBtn, editBtn];
-          if (liveMetrics.plan !== '—') {
-            const argonPart = liveMetrics.argon !== '—' && liveMetrics.argon !== 'incl.' ? ` · Argon ${liveMetrics.argon}` : '';
-            detailText = `${liveMetrics.plan} · Gemini ${liveMetrics.gemini} · Claude ${liveMetrics.claudeGpt}${argonPart}`;
-          } else {
-            detailText = 'Active account';
-          }
-        } else if (profile.cachedQuota) {
-          const q = profile.cachedQuota;
-          const argonPart = q.argon !== '—' && q.argon !== 'incl.' ? ` · Argon ${q.argon}` : '';
-          detailText = `${q.plan} · Gemini ${q.gemini} · Claude ${q.claudeGpt}${argonPart}`;
-        }
-
-        items.push({
-          label: profile.name,
-          iconPath: isActive
-            ? new vscode.ThemeIcon('check', new vscode.ThemeColor('charts.green'))
-            : new vscode.ThemeIcon('circle-outline'),
-          description: profile.email + (isActive ? ' · Active' : ''),
-          detail: detailText,
-          actionType: 'switch',
-          profileId: profile.id,
-          isCurrentActive: isActive,
-          buttons
+      if (profiles.length > 0) {
+        result.push({
+          label: 'Delete profile',
+          description: 'Remove saved profile from vault',
+          iconPath: new vscode.ThemeIcon('trash'),
+          actionType: 'delete'
         });
       }
-    }
 
-    // 2. Actions Section
-    items.push({
-      label: 'Actions',
-      kind: vscode.QuickPickItemKind.Separator,
-      actionType: 'save'
-    });
-
-    items.push({
-      label: 'Add new account',
-      description: 'Prepare new Google sign-in',
-      iconPath: new vscode.ThemeIcon('add'),
-      actionType: 'add'
-    });
-
-    items.push({
-      label: 'Save session as profile',
-      description: live.email ? `Snapshot "${live.email}"` : 'Snapshot current credentials',
-      iconPath: new vscode.ThemeIcon('save'),
-      actionType: 'save'
-    });
-
-    if (profiles.length > 0) {
-      items.push({
-        label: 'Delete profile',
-        description: 'Remove saved profile from vault',
-        iconPath: new vscode.ThemeIcon('trash'),
-        actionType: 'delete'
+      result.push({
+        label: 'Open vault folder',
+        description: 'Reveal ~/.gemini/charlier/',
+        iconPath: new vscode.ThemeIcon('folder'),
+        actionType: 'open'
       });
-    }
 
-    items.push({
-      label: 'Open vault folder',
-      description: 'Reveal ~/.gemini/charlier/',
-      iconPath: new vscode.ThemeIcon('folder'),
-      actionType: 'open'
+      result.push({
+        label: 'Reload window',
+        description: 'Restart language server and reload VS Code',
+        iconPath: new vscode.ThemeIcon('refresh'),
+        actionType: 'reload'
+      });
+
+      return result;
+    };
+
+    quickPick.items = buildItems(liveMetrics);
+
+    // Refresh non-blockingly in background
+    this.quotaService.getQuotaSummary().then((fresh) => {
+      if (fresh) {
+        const freshMetrics = this.quotaService.parseMetrics(fresh);
+        quickPick.items = buildItems(freshMetrics);
+      }
     });
-
-    items.push({
-      label: 'Reload window',
-      description: 'Restart language server and reload VS Code',
-      iconPath: new vscode.ThemeIcon('refresh'),
-      actionType: 'reload'
-    });
-
-    quickPick.items = items;
 
     // Handle button clicks directly on rows
     quickPick.onDidTriggerItemButton(async (e) => {
@@ -488,7 +499,7 @@ export class UIController {
       } else if (isClaudeGpt) {
         subheader += ' (Opus, Sonnet, GPT-OSS)';
       } else {
-        subheader += quota.hasArgonGroup ? ' (Flash, Pro)' : ' (Argon Included)';
+        subheader += quota.planTier === 'ULTRA' ? ' (Argon Included)' : ' (Flash, Pro)';
       }
 
       items.push({

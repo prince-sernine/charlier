@@ -44,8 +44,11 @@ export interface QuotaGroup {
   buckets: QuotaBucket[];
 }
 
+export type UserPlanTier = 'FREE' | 'PRO' | 'ULTRA' | 'ENTERPRISE';
+
 export interface QuotaSummary {
-  tier: 'Pro Plan' | 'Ultra Plan' | 'Standard';
+  tier: 'Free Tier' | 'Pro Plan' | 'Ultra Plan' | 'Enterprise' | 'Standard';
+  planTier: UserPlanTier;
   groups: QuotaGroup[];
   hasArgonGroup: boolean;
   fetchedAt: number;

@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { getDaemonSearchDirs } from './constants';
-import { QuotaSummary, QuotaGroup, CachedQuotaMetric, ProfileMetadata } from './types';
+import { QuotaSummary, QuotaGroup, CachedQuotaMetric, ProfileMetadata, UserPlanTier } from './types';
 
 interface DaemonInfo {
   pid?: number;
@@ -20,6 +20,10 @@ export class QuotaService {
     this.cachedSummary = null;
   }
 
+  public getCachedSummary(): QuotaSummary | null {
+    return this.cachedSummary;
+  }
+
   public async getQuotaSummary(forceRefresh = false): Promise<QuotaSummary | null> {
     const now = Date.now();
     if (!forceRefresh && this.cachedSummary && now - this.cachedSummary.fetchedAt < this.cacheTtlMs) {
@@ -32,8 +36,10 @@ export class QuotaService {
 
     this.inFlightPromise = this.fetchFromDaemon(forceRefresh)
       .then((summary) => {
-        this.cachedSummary = summary;
-        return summary;
+        if (summary) {
+          this.cachedSummary = summary;
+        }
+        return summary || this.cachedSummary;
       })
       .catch((err) => {
         console.warn('[Charlier] Could not query Antigravity daemon:', err);
@@ -90,11 +96,8 @@ export class QuotaService {
     return candidates[0];
   }
 
-  private async fetchFromDaemon(forceRefresh: boolean): Promise<QuotaSummary | null> {
-    const daemon = this.findActiveDaemon();
-    if (!daemon) return null;
-
-    const jsonPayload = JSON.stringify({ force_refresh: forceRefresh });
+  private queryDaemonRpc<T>(daemon: DaemonInfo, rpcPath: string, payload: any): Promise<T | null> {
+    const jsonPayload = JSON.stringify(payload);
     const payloadBuf = Buffer.from(jsonPayload, 'utf8');
     const frame = Buffer.alloc(5 + payloadBuf.length);
     frame.writeUInt8(0, 0);
@@ -102,77 +105,61 @@ export class QuotaService {
     payloadBuf.copy(frame, 5);
 
     return new Promise((resolve) => {
-      const req = http.request({
-        hostname: '127.0.0.1',
-        port: daemon.httpPort,
-        path: '/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary',
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/grpc-web+json',
-          'X-Grpc-Web': '1',
-          'x-codeium-csrf-token': daemon.csrfToken,
-          'Content-Length': frame.length
+      const req = http.request(
+        {
+          hostname: '127.0.0.1',
+          port: daemon.httpPort,
+          path: rpcPath,
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/grpc-web+json',
+            'X-Grpc-Web': '1',
+            'x-codeium-csrf-token': daemon.csrfToken,
+            'Content-Length': frame.length
+          },
+          timeout: 2500
         },
-        timeout: 2500
-      }, (res) => {
-        if (res.statusCode !== 200) {
-          resolve(null);
-          return;
-        }
-
-        const chunks: Buffer[] = [];
-        res.on('data', (c: Buffer) => chunks.push(c));
-        res.on('end', () => {
-          const full = Buffer.concat(chunks);
-          let offset = 0;
-          let rawJson = '';
-
-          if (full.length > 0 && full[0] === 0x7b) {
-            rawJson = full.toString('utf8');
-          } else {
-            while (offset + 5 <= full.length) {
-              const flags = full.readUInt8(offset);
-              const len = full.readUInt32BE(offset + 1);
-              offset += 5;
-              const data = full.subarray(offset, offset + len);
-              offset += len;
-              if (flags === 0) {
-                rawJson = data.toString('utf8');
-              }
-            }
-          }
-
-          if (!rawJson) {
+        (res) => {
+          if (res.statusCode !== 200) {
             resolve(null);
             return;
           }
 
-          try {
-            const parsed = JSON.parse(rawJson);
-            const groups: QuotaGroup[] = parsed.response?.groups || [];
-            const hasArgonGroup = groups.some(
-              (g) =>
-                (g.displayName && g.displayName.toLowerCase().includes('argon')) ||
-                (g.description && g.description.toLowerCase().includes('argon'))
-            );
+          const chunks: Buffer[] = [];
+          res.on('data', (c: Buffer) => chunks.push(c));
+          res.on('end', () => {
+            const full = Buffer.concat(chunks);
+            let offset = 0;
+            let rawJson = '';
 
-            const tier: QuotaSummary['tier'] = groups.length === 0
-              ? 'Standard'
-              : hasArgonGroup
-              ? 'Pro Plan'
-              : 'Ultra Plan';
+            if (full.length > 0 && full[0] === 0x7b) {
+              rawJson = full.toString('utf8');
+            } else {
+              while (offset + 5 <= full.length) {
+                const flags = full.readUInt8(offset);
+                const len = full.readUInt32BE(offset + 1);
+                offset += 5;
+                const data = full.subarray(offset, offset + len);
+                offset += len;
+                if (flags === 0) {
+                  rawJson = data.toString('utf8');
+                }
+              }
+            }
 
-            resolve({
-              tier,
-              groups,
-              hasArgonGroup,
-              fetchedAt: Date.now()
-            });
-          } catch {
-            resolve(null);
-          }
-        });
-      });
+            if (!rawJson) {
+              resolve(null);
+              return;
+            }
+
+            try {
+              resolve(JSON.parse(rawJson));
+            } catch {
+              resolve(null);
+            }
+          });
+        }
+      );
 
       req.on('error', () => resolve(null));
       req.on('timeout', () => {
@@ -183,6 +170,71 @@ export class QuotaService {
       req.write(frame);
       req.end();
     });
+  }
+
+  private async fetchFromDaemon(forceRefresh: boolean): Promise<QuotaSummary | null> {
+    const daemon = this.findActiveDaemon();
+    if (!daemon) return null;
+
+    const [statusRes, quotaRes] = await Promise.all([
+      this.queryDaemonRpc<any>(daemon, '/exa.language_server_pb.LanguageServerService/GetUserStatus', {}),
+      this.queryDaemonRpc<any>(daemon, '/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary', { force_refresh: forceRefresh })
+    ]);
+
+    if (!quotaRes && !statusRes) return null;
+
+    const groups: QuotaGroup[] = quotaRes?.response?.groups || [];
+    const hasArgonGroup = groups.some(
+      (g) =>
+        (g.displayName && g.displayName.toLowerCase().includes('argon')) ||
+        (g.description && g.description.toLowerCase().includes('argon'))
+    );
+
+    // Canonical plan identification
+    const planInfo = statusRes?.userStatus?.planStatus?.planInfo;
+    const userTier = statusRes?.userStatus?.userTier;
+    const rawPlanName = (planInfo?.planName || '').toLowerCase().trim();
+    const teamsTier = (planInfo?.teamsTier || '').toUpperCase().trim();
+    const userTierName = (userTier?.name || '').toLowerCase().trim();
+    const userTierId = (userTier?.id || '').toLowerCase().trim();
+
+    let planTier: UserPlanTier = 'FREE';
+
+    if (
+      rawPlanName === 'ultra' ||
+      userTierName.includes('ultra') ||
+      userTierId.includes('ultra') ||
+      teamsTier.includes('ULTRA') ||
+      teamsTier.includes('ULTIMATE')
+    ) {
+      planTier = 'ULTRA';
+    } else if (
+      rawPlanName === 'pro' ||
+      userTierName.includes('pro') ||
+      userTierId.includes('pro') ||
+      teamsTier.includes('PRO') ||
+      hasArgonGroup
+    ) {
+      planTier = 'PRO';
+    } else if (teamsTier.includes('ENTERPRISE')) {
+      planTier = 'ENTERPRISE';
+    } else {
+      planTier = 'FREE';
+    }
+
+    const tier: QuotaSummary['tier'] =
+      planTier === 'ULTRA' ? 'Ultra Plan'
+      : planTier === 'PRO' ? 'Pro Plan'
+      : planTier === 'ENTERPRISE' ? 'Enterprise'
+      : 'Free Tier';
+
+    return {
+      tier,
+      planTier,
+      groups,
+      hasArgonGroup,
+      fetchedAt: Date.now()
+    };
   }
 
   public renderLinenMeter(fraction: number, length = 5): string {
@@ -209,7 +261,7 @@ export class QuotaService {
   public parseMetrics(quota: QuotaSummary | null): CachedQuotaMetric {
     if (!quota || !quota.groups || quota.groups.length === 0) {
       return {
-        plan: '—',
+        plan: quota?.planTier || '—',
         gemini: '—',
         claudeGpt: '—',
         argon: '—',
@@ -217,10 +269,10 @@ export class QuotaService {
       };
     }
 
-    const plan = quota.hasArgonGroup ? 'PRO' : 'ULTRA';
+    const plan = quota.planTier || (quota.hasArgonGroup ? 'PRO' : 'FREE');
     let gemini = '—';
     let claudeGpt = '—';
-    let argon = quota.hasArgonGroup ? '—' : 'incl.';
+    let argon = plan === 'ULTRA' ? 'incl.' : '—';
 
     for (const group of quota.groups) {
       const name = group.displayName.toLowerCase();
@@ -229,14 +281,14 @@ export class QuotaService {
         if (b) {
           const frac = b.remainingFraction ?? 0;
           const pct = Math.round(frac * 100);
-          argon = `${this.renderLinenMeter(frac, 5)} ${pct}%`;
+          argon = `${pct}%`;
         }
       } else if (name.includes('claude') || name.includes('gpt')) {
         const weekly = group.buckets.find((b) => b.window === 'weekly') || group.buckets[0];
         if (weekly) {
           const frac = weekly.remainingFraction ?? 0;
           const pct = Math.round(frac * 100);
-          claudeGpt = `${this.renderLinenMeter(frac, 5)} ${pct}%`;
+          claudeGpt = `${pct}%`;
         }
       } else if (name.includes('gemini')) {
         const b5h = group.buckets.find((b) => b.window === '5h');
@@ -245,7 +297,7 @@ export class QuotaService {
         const fWk = bWeekly?.remainingFraction ?? 1;
         const minFrac = Math.min(f5h, fWk);
         const pct = Math.round(minFrac * 100);
-        gemini = `${this.renderLinenMeter(minFrac, 5)} ${pct}%`;
+        gemini = `${pct}%`;
       }
     }
 
@@ -296,7 +348,7 @@ export class QuotaService {
 
     const displayName = activeProfile?.name || (liveEmail ? liveEmail.split('@')[0] : 'Ready for login');
     const emailDisplay = activeProfile?.email || liveEmail || 'No account active';
-    const planBadge = liveQuota ? (liveQuota.hasArgonGroup ? 'PRO' : 'ULTRA') : (activeProfile?.cachedQuota?.plan || 'PRO');
+    const planBadge = liveQuota ? liveQuota.planTier : (activeProfile?.cachedQuota?.plan || 'PRO');
 
     // 1. Hero Instrument Card
     md.appendMarkdown(`### Charlier · **${displayName}** &nbsp;\`${planBadge}\`\n\n`);
@@ -356,7 +408,7 @@ export class QuotaService {
       }
 
       // Argon row
-      if (liveQuota.hasArgonGroup && argonGroup) {
+      if (liveQuota.planTier === 'PRO' && argonGroup) {
         const b = argonGroup.buckets[0];
         const frac = b?.remainingFraction ?? 0;
         const meter = this.renderLinenMeter(frac, 5);
@@ -367,9 +419,13 @@ export class QuotaService {
         md.appendMarkdown(
           `**Argon** &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \`${meter} ${p}%\` &nbsp;·&nbsp; ${statusNote}${r ? ` &nbsp;·&nbsp; resets in **${r}**` : ''}\n\n`
         );
-      } else if (!liveQuota.hasArgonGroup) {
+      } else if (liveQuota.planTier === 'ULTRA') {
         md.appendMarkdown(
           `**Argon** &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \`Included in Gemini pool\` &nbsp;·&nbsp; Ultra tier\n\n`
+        );
+      } else {
+        md.appendMarkdown(
+          `**Argon** &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \`—\` &nbsp;·&nbsp; Not included in Free tier\n\n`
         );
       }
     } else if (!liveQuota && !liveEmail) {
@@ -387,7 +443,7 @@ export class QuotaService {
         this.padTableCell('Profile'),
         this.padTableCell('Plan'),
         this.padTableCell('Gemini'),
-        this.padTableCell('Claude & GPT'),
+        this.padTableCell('Claude'),
         this.padTableCell('Argon')
       ];
       const separators = [':---:', ':---', ':---:', ':---:', ':---:', ':---:'];
@@ -402,22 +458,27 @@ export class QuotaService {
           p.id === activeProfileId ||
           (liveEmail && p.email.toLowerCase() === liveEmail.toLowerCase());
 
-        const marker = isActive ? '●' : '○';
+        const marker = isActive ? '$(check)' : '&nbsp;';
         const switchUri = `command:charlier.switchProfileDirect?${encodeURIComponent(JSON.stringify(p.id))}`;
         const linkTitle = p.email ? p.email.replace(/"/g, '\\"') : '';
         const linkedName = isActive
-          ? `**${p.name}**`
+          ? `**${p.name}** &nbsp;*(current)*`
           : `[${p.name}](${switchUri} "${linkTitle}")`;
 
         const metrics = isActive ? liveMetrics : p.cachedQuota || { plan: '—', gemini: '—', claudeGpt: '—', argon: '—' };
 
+        const planText = isActive ? `**\`${metrics.plan}\`**` : `\`${metrics.plan}\``;
+        const geminiText = isActive ? `**${metrics.gemini}**` : metrics.gemini;
+        const claudeText = isActive ? `**${metrics.claudeGpt}**` : metrics.claudeGpt;
+        const argonText = isActive ? `**${metrics.argon}**` : metrics.argon;
+
         const cells = [
           this.padTableCell(marker),
           this.padTableCell(linkedName),
-          this.padTableCell(`\`${metrics.plan}\``),
-          this.padTableCell(`\`${metrics.gemini}\``),
-          this.padTableCell(`\`${metrics.claudeGpt}\``),
-          this.padTableCell(`\`${metrics.argon}\``)
+          this.padTableCell(planText),
+          this.padTableCell(geminiText),
+          this.padTableCell(claudeText),
+          this.padTableCell(argonText)
         ];
 
         md.appendMarkdown(`| ${cells.join(' | ')} |\n`);
