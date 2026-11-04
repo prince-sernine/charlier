@@ -149,6 +149,53 @@ export class Vault {
     fs.writeFileSync(stateFile, JSON.stringify(state, null, 2), 'utf8');
   }
 
+  public updateProfileCredentials(id: string, newName?: string): ProfileMetadata {
+    const existing = this.getProfile(id);
+    if (!existing) {
+      throw new Error(`Profile "${id}" does not exist.`);
+    }
+
+    const live = this.getLiveSessionInfo();
+    const accountsPath = getActiveGoogleAccountsPath();
+    const oauthPath = getActiveOAuthCredsPath();
+    const keyringSecret = this.keyring.read();
+
+    const profileFolder = path.join(getProfilesDir(), id);
+    if (!fs.existsSync(profileFolder)) {
+      fs.mkdirSync(profileFolder, { recursive: true });
+    }
+
+    const targetAccounts = path.join(profileFolder, 'google_accounts.json');
+    const targetOAuth = path.join(profileFolder, 'oauth_creds.json');
+    const targetKeyring = path.join(profileFolder, 'keyring_credential.json');
+    const targetMeta = path.join(profileFolder, 'metadata.json');
+
+    if (fs.existsSync(accountsPath)) {
+      fs.copyFileSync(accountsPath, targetAccounts);
+    }
+    if (fs.existsSync(oauthPath)) {
+      fs.copyFileSync(oauthPath, targetOAuth);
+    }
+    if (keyringSecret) {
+      fs.writeFileSync(targetKeyring, keyringSecret, 'utf8');
+    }
+
+    const now = Date.now();
+    const metadata: ProfileMetadata = {
+      id: existing.id,
+      name: newName && newName.trim() ? newName.trim() : existing.name,
+      email: live.email || existing.email,
+      createdAt: existing.createdAt,
+      updatedAt: now,
+      tokenExpiryDate: live.tokenExpiryDate || existing.tokenExpiryDate
+    };
+
+    fs.writeFileSync(targetMeta, JSON.stringify(metadata, null, 2), 'utf8');
+    this.saveState({ activeProfileId: id, lastUpdated: now });
+
+    return metadata;
+  }
+
   public saveCurrentAsProfile(name: string): ProfileMetadata {
     const live = this.getLiveSessionInfo();
     const accountsPath = getActiveGoogleAccountsPath();
@@ -157,6 +204,16 @@ export class Vault {
 
     if (!fs.existsSync(accountsPath) && !fs.existsSync(oauthPath) && !keyringSecret) {
       throw new Error('No active Antigravity credentials found to save.');
+    }
+
+    // Smart hybrid merge: if profile with same email exists, merge tokens and update name
+    if (live.email) {
+      const existing = this.listProfiles().find(
+        (p) => p.email.toLowerCase() === live.email!.toLowerCase()
+      );
+      if (existing) {
+        return this.updateProfileCredentials(existing.id, name);
+      }
     }
 
     const id = this.slugify(name);
@@ -243,12 +300,18 @@ export class Vault {
   }
 
   public prepareNewLogin(): void {
-    // 1. Back up current active if not saved
+    // 1. Back up current active if email present: smart merge into existing profile if known
     const live = this.getLiveSessionInfo();
     if (live.email) {
-      const existing = this.listProfiles().find((p) => p.email.toLowerCase() === live.email!.toLowerCase());
-      if (!existing) {
-        this.saveCurrentAsProfile(`Backup (${live.email})`);
+      const existing = this.listProfiles().find(
+        (p) => p.email.toLowerCase() === live.email!.toLowerCase()
+      );
+      if (existing) {
+        // Merge newest tokens while preserving user's custom profile name!
+        this.updateProfileCredentials(existing.id);
+      } else {
+        const defaultName = live.email.includes('@') ? live.email.split('@')[0] : live.email;
+        this.saveCurrentAsProfile(defaultName);
       }
     }
 

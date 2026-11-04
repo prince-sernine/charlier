@@ -34,6 +34,11 @@
         "category": "Charlier"
       },
       {
+        "command": "charlier.viewQuota",
+        "title": "Charlier: View Quota & Model Limits",
+        "category": "Charlier"
+      },
+      {
         "command": "charlier.saveProfile",
         "title": "Charlier: Save Current Profile",
         "category": "Charlier"
