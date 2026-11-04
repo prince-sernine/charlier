@@ -50,7 +50,7 @@ export class UIController {
       );
     } else {
       this.statusBarItem.text = `$(arrow-swap) Charlier: No Account`;
-      this.statusBarItem.tooltip = `Charlier: No active Google Antigravity credentials found.\nClick to sign in or load profile.`;
+      this.statusBarItem.tooltip = `Charlier: No active Google Antigravity credentials found in OS keyring or disk.\nClick to sign in or load profile.`;
     }
   }
 
@@ -92,7 +92,7 @@ export class UIController {
 
     items.push({
       label: '$(add) Add New Account...',
-      description: 'Clears active token so you can log in with another account',
+      description: 'Preserves current credentials and clears token so you can log into another account',
       actionType: 'add'
     });
 
@@ -158,11 +158,11 @@ export class UIController {
 
       const choice = await vscode.window.showInformationMessage(
         `Switched to Antigravity profile "${meta.name}" (${meta.email}).`,
-        'Reload Window',
+        'Reload Window Now',
         'Later'
       );
 
-      if (choice === 'Reload Window') {
+      if (choice === 'Reload Window Now') {
         await vscode.commands.executeCommand('workbench.action.reloadWindow');
       }
     } catch (err: any) {
@@ -212,8 +212,15 @@ export class UIController {
       this.vault.prepareNewLogin();
       this.update();
 
+      // Dispatch native sign out RPC so Antigravity releases in-memory state
+      try {
+        await vscode.commands.executeCommand('antigravity.signOut');
+      } catch {
+        // Fallback if command not registered
+      }
+
       const reload = await vscode.window.showInformationMessage(
-        'Credentials cleared. Reload the window, open Antigravity, and sign in with your new account. Once logged in, run "Charlier: Save Current Profile".',
+        'Credentials cleared from OS keyring and disk. Reload the window, open Antigravity, and sign in with your new account. Once logged in, run "Charlier: Save Current Profile".',
         'Reload Window Now',
         'Later'
       );
@@ -266,4 +273,3 @@ export class UIController {
     this.statusBarItem.dispose();
   }
 }
-

@@ -4,13 +4,16 @@ import {
   getActiveGoogleAccountsPath,
   getActiveOAuthCredsPath,
   getProfilesDir,
-  getStateFilePath,
-  getCharlierDir
+  getStateFilePath
 } from './constants';
 import { ProfileMetadata, CharlierState, LiveSessionInfo } from './types';
+import { KeyringManager } from './keyring';
 
 export class Vault {
-  constructor() {
+  private keyring: KeyringManager;
+
+  constructor(keyring: KeyringManager) {
+    this.keyring = keyring;
     this.ensureDirectories();
   }
 
@@ -26,30 +29,55 @@ export class Vault {
     let tokenExpiryDate: number | null = null;
     let hasOAuthCreds = false;
 
-    const accountsPath = getActiveGoogleAccountsPath();
-    if (fs.existsSync(accountsPath)) {
+    // Check OS Keyring first (source of truth for Antigravity)
+    const keyringRaw = this.keyring.read();
+    if (keyringRaw) {
       try {
-        const raw = fs.readFileSync(accountsPath, 'utf8');
-        const parsed = JSON.parse(raw);
-        if (typeof parsed?.active === 'string' && parsed.active.trim()) {
-          email = parsed.active.trim();
+        const parsedKeyring = JSON.parse(keyringRaw);
+        if (typeof parsedKeyring.id_token_email === 'string' && parsedKeyring.id_token_email.trim()) {
+          email = parsedKeyring.id_token_email.trim();
+        }
+        if (parsedKeyring.token) {
+          hasOAuthCreds = true;
+          if (typeof parsedKeyring.token.expiry === 'string') {
+            tokenExpiryDate = new Date(parsedKeyring.token.expiry).getTime();
+          }
         }
       } catch {
-        // Corrupted or inaccessible
+        // Corrupted keyring payload
       }
     }
 
-    const oauthPath = getActiveOAuthCredsPath();
-    if (fs.existsSync(oauthPath)) {
-      hasOAuthCreds = true;
-      try {
-        const raw = fs.readFileSync(oauthPath, 'utf8');
-        const parsed = JSON.parse(raw);
-        if (typeof parsed?.expiry_date === 'number') {
-          tokenExpiryDate = parsed.expiry_date;
+    // Fallback to google_accounts.json
+    if (!email) {
+      const accountsPath = getActiveGoogleAccountsPath();
+      if (fs.existsSync(accountsPath)) {
+        try {
+          const raw = fs.readFileSync(accountsPath, 'utf8');
+          const parsed = JSON.parse(raw);
+          if (typeof parsed?.active === 'string' && parsed.active.trim()) {
+            email = parsed.active.trim();
+          }
+        } catch {
+          // Inaccessible
         }
-      } catch {
-        // Corrupted or inaccessible
+      }
+    }
+
+    // Fallback to oauth_creds.json
+    if (!hasOAuthCreds) {
+      const oauthPath = getActiveOAuthCredsPath();
+      if (fs.existsSync(oauthPath)) {
+        hasOAuthCreds = true;
+        try {
+          const raw = fs.readFileSync(oauthPath, 'utf8');
+          const parsed = JSON.parse(raw);
+          if (typeof parsed?.expiry_date === 'number') {
+            tokenExpiryDate = parsed.expiry_date;
+          }
+        } catch {
+          // Inaccessible
+        }
       }
     }
 
@@ -125,8 +153,9 @@ export class Vault {
     const live = this.getLiveSessionInfo();
     const accountsPath = getActiveGoogleAccountsPath();
     const oauthPath = getActiveOAuthCredsPath();
+    const keyringSecret = this.keyring.read();
 
-    if (!fs.existsSync(accountsPath) && !fs.existsSync(oauthPath)) {
+    if (!fs.existsSync(accountsPath) && !fs.existsSync(oauthPath) && !keyringSecret) {
       throw new Error('No active Antigravity credentials found to save.');
     }
 
@@ -138,6 +167,7 @@ export class Vault {
 
     const targetAccounts = path.join(profileFolder, 'google_accounts.json');
     const targetOAuth = path.join(profileFolder, 'oauth_creds.json');
+    const targetKeyring = path.join(profileFolder, 'keyring_credential.json');
     const targetMeta = path.join(profileFolder, 'metadata.json');
 
     if (fs.existsSync(accountsPath)) {
@@ -145,6 +175,9 @@ export class Vault {
     }
     if (fs.existsSync(oauthPath)) {
       fs.copyFileSync(oauthPath, targetOAuth);
+    }
+    if (keyringSecret) {
+      fs.writeFileSync(targetKeyring, keyringSecret, 'utf8');
     }
 
     const existing = this.getProfile(id);
@@ -168,6 +201,7 @@ export class Vault {
     const profileFolder = path.join(getProfilesDir(), id);
     const sourceAccounts = path.join(profileFolder, 'google_accounts.json');
     const sourceOAuth = path.join(profileFolder, 'oauth_creds.json');
+    const sourceKeyring = path.join(profileFolder, 'keyring_credential.json');
     const sourceMeta = path.join(profileFolder, 'metadata.json');
 
     if (!fs.existsSync(sourceMeta)) {
@@ -179,7 +213,13 @@ export class Vault {
     const accountsPath = getActiveGoogleAccountsPath();
     const oauthPath = getActiveOAuthCredsPath();
 
-    // Perform atomic file replacement
+    // 1. Swap OS Keyring (source of truth)
+    if (fs.existsSync(sourceKeyring)) {
+      const secret = fs.readFileSync(sourceKeyring, 'utf8');
+      this.keyring.write(secret);
+    }
+
+    // 2. Perform atomic file replacement on disk stores
     if (fs.existsSync(sourceAccounts)) {
       this.atomicWriteFile(accountsPath, fs.readFileSync(sourceAccounts));
     }
@@ -203,7 +243,7 @@ export class Vault {
   }
 
   public prepareNewLogin(): void {
-    // Back up current active if not saved
+    // 1. Back up current active if not saved
     const live = this.getLiveSessionInfo();
     if (live.email) {
       const existing = this.listProfiles().find((p) => p.email.toLowerCase() === live.email!.toLowerCase());
@@ -212,6 +252,10 @@ export class Vault {
       }
     }
 
+    // 2. Clear OS Keyring credential (this is what Antigravity checks!)
+    this.keyring.delete();
+
+    // 3. Clear disk credentials
     const accountsPath = getActiveGoogleAccountsPath();
     const oauthPath = getActiveOAuthCredsPath();
 
@@ -219,7 +263,6 @@ export class Vault {
       fs.unlinkSync(oauthPath);
     }
     if (fs.existsSync(accountsPath)) {
-      // Clear active from accounts
       try {
         const raw = fs.readFileSync(accountsPath, 'utf8');
         const parsed = JSON.parse(raw);
@@ -261,4 +304,3 @@ export class Vault {
       .replace(/^-+|-+$/g, '') || `profile-${Date.now()}`;
   }
 }
-

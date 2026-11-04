@@ -2,13 +2,15 @@ import * as vscode from 'vscode';
 import { Vault } from './vault';
 import { UIController } from './ui';
 import { CredentialWatcher } from './watcher';
+import { KeyringManager } from './keyring';
 import { getProfilesDir } from './constants';
 
 let uiController: UIController | null = null;
 let watcher: CredentialWatcher | null = null;
 
 export function activate(context: vscode.ExtensionContext): void {
-  const vault = new Vault();
+  const keyring = new KeyringManager(context.extensionPath);
+  const vault = new Vault(keyring);
   uiController = new UIController(vault);
 
   // Watcher automatically updates the status bar if auth changes externally
@@ -53,4 +55,3 @@ export function deactivate(): void {
   watcher = null;
   uiController = null;
 }
-

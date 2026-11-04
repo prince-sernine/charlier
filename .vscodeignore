@@ -1,6 +1,7 @@
 .vscode/**
 .vscode-test/**
 src/**
+src-native/**
 tsconfig.json
 esbuild.config.mjs
 *.local.md
