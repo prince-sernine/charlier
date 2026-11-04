@@ -9,12 +9,13 @@ import { getProfilesDir } from './constants';
 let uiController: UIController | null = null;
 let watcher: CredentialWatcher | null = null;
 let quotaService: QuotaService | null = null;
+let vaultInstance: Vault | null = null;
 
 export function activate(context: vscode.ExtensionContext): void {
-  const keyring = new KeyringManager(context.extensionPath);
-  const vault = new Vault(keyring);
+  const keyring = new KeyringManager();
+  vaultInstance = new Vault(keyring);
   quotaService = new QuotaService();
-  uiController = new UIController(vault, quotaService);
+  uiController = new UIController(vaultInstance, quotaService);
 
   // Watcher automatically updates the status bar and probes if new account logged in externally
   watcher = new CredentialWatcher(() => {
@@ -40,8 +41,23 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('charlier.switchProfile', async () => {
       await uiController?.showQuickPickMenu();
     }),
+    vscode.commands.registerCommand('charlier.switchProfileDirect', async (profileId: any) => {
+      const idStr = typeof profileId === 'string' ? decodeURIComponent(profileId) : String(profileId || '');
+      if (idStr) {
+        await uiController?.handleSwitch(idStr);
+      }
+    }),
     vscode.commands.registerCommand('charlier.viewQuota', async () => {
       await uiController?.showQuotaDetails();
+    }),
+    vscode.commands.registerCommand('charlier.refreshQuota', async () => {
+      await uiController?.refreshQuota();
+    }),
+    vscode.commands.registerCommand('charlier.renameProfile', async (profileId?: string) => {
+      const targetId = profileId || vaultInstance?.getState().activeProfileId;
+      if (targetId) {
+        await uiController?.handleRename(targetId);
+      }
     }),
     vscode.commands.registerCommand('charlier.saveProfile', async () => {
       await uiController?.handleSaveCurrent();
@@ -77,4 +93,5 @@ export function deactivate(): void {
   watcher = null;
   uiController = null;
   quotaService = null;
+  vaultInstance = null;
 }

@@ -6,7 +6,7 @@ import {
   getProfilesDir,
   getStateFilePath
 } from './constants';
-import { ProfileMetadata, CharlierState, LiveSessionInfo } from './types';
+import { ProfileMetadata, CharlierState, LiveSessionInfo, CachedQuotaMetric } from './types';
 import { KeyringManager } from './keyring';
 
 export class Vault {
@@ -28,6 +28,7 @@ export class Vault {
     let email: string | null = null;
     let tokenExpiryDate: number | null = null;
     let hasOAuthCreds = false;
+    let hasRefreshToken = false;
 
     // Check OS Keyring first (source of truth for Antigravity)
     const keyringRaw = this.keyring.read();
@@ -39,6 +40,9 @@ export class Vault {
         }
         if (parsedKeyring.token) {
           hasOAuthCreds = true;
+          if (parsedKeyring.token.refresh_token) {
+            hasRefreshToken = true;
+          }
           if (typeof parsedKeyring.token.expiry === 'string') {
             tokenExpiryDate = new Date(parsedKeyring.token.expiry).getTime();
           }
@@ -65,14 +69,17 @@ export class Vault {
     }
 
     // Fallback to oauth_creds.json
-    if (!hasOAuthCreds) {
+    if (!hasOAuthCreds || !hasRefreshToken) {
       const oauthPath = getActiveOAuthCredsPath();
       if (fs.existsSync(oauthPath)) {
-        hasOAuthCreds = true;
         try {
           const raw = fs.readFileSync(oauthPath, 'utf8');
           const parsed = JSON.parse(raw);
-          if (typeof parsed?.expiry_date === 'number') {
+          hasOAuthCreds = true;
+          if (parsed?.refresh_token) {
+            hasRefreshToken = true;
+          }
+          if (typeof parsed?.expiry_date === 'number' && !tokenExpiryDate) {
             tokenExpiryDate = parsed.expiry_date;
           }
         } catch {
@@ -82,7 +89,8 @@ export class Vault {
     }
 
     const now = Date.now();
-    const isExpired = tokenExpiryDate !== null && tokenExpiryDate <= now;
+    // Only flag expired if there's no refresh token to auto-renew access tokens
+    const isExpired = hasOAuthCreds && !hasRefreshToken && tokenExpiryDate !== null && tokenExpiryDate <= now;
 
     return {
       email,
@@ -297,6 +305,32 @@ export class Vault {
     if (state.activeProfileId === id) {
       this.saveState({ activeProfileId: null, lastUpdated: Date.now() });
     }
+  }
+
+  public renameProfile(id: string, newName: string): ProfileMetadata {
+    const trimmed = newName.trim();
+    if (!trimmed) {
+      throw new Error('Profile name cannot be empty.');
+    }
+    const metaPath = path.join(getProfilesDir(), id, 'metadata.json');
+    if (!fs.existsSync(metaPath)) {
+      throw new Error(`Profile "${id}" does not exist.`);
+    }
+    const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8')) as ProfileMetadata;
+    meta.name = trimmed;
+    meta.updatedAt = Date.now();
+    fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf8');
+    return meta;
+  }
+
+  public updateProfileCachedQuota(id: string, cachedQuota: CachedQuotaMetric): void {
+    const metaPath = path.join(getProfilesDir(), id, 'metadata.json');
+    if (!fs.existsSync(metaPath)) return;
+    try {
+      const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8')) as ProfileMetadata;
+      meta.cachedQuota = cachedQuota;
+      fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf8');
+    } catch {}
   }
 
   public prepareNewLogin(): void {

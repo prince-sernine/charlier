@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { getDaemonSearchDirs } from './constants';
-import { QuotaSummary, QuotaGroup, QuotaBucket } from './types';
+import { QuotaSummary, QuotaGroup, CachedQuotaMetric, ProfileMetadata } from './types';
 
 interface DaemonInfo {
   pid?: number;
@@ -36,7 +36,7 @@ export class QuotaService {
         return summary;
       })
       .catch((err) => {
-        console.warn('[Charlier] Could not fetch quota from Antigravity daemon:', err);
+        console.warn('[Charlier] Could not query Antigravity daemon:', err);
         return this.cachedSummary;
       })
       .finally(() => {
@@ -75,14 +75,9 @@ export class QuotaService {
       } catch {}
     }
 
-    if (candidates.length === 0) {
-      return null;
-    }
-
-    // Sort newest first
+    if (candidates.length === 0) return null;
     candidates.sort((a, b) => b.mtime - a.mtime);
 
-    // Prefer alive process
     for (const cand of candidates) {
       if (cand.pid) {
         try {
@@ -97,14 +92,12 @@ export class QuotaService {
 
   private async fetchFromDaemon(forceRefresh: boolean): Promise<QuotaSummary | null> {
     const daemon = this.findActiveDaemon();
-    if (!daemon) {
-      return null;
-    }
+    if (!daemon) return null;
 
     const jsonPayload = JSON.stringify({ force_refresh: forceRefresh });
     const payloadBuf = Buffer.from(jsonPayload, 'utf8');
     const frame = Buffer.alloc(5 + payloadBuf.length);
-    frame.writeUInt8(0, 0); // 0 = gRPC-web data frame
+    frame.writeUInt8(0, 0);
     frame.writeUInt32BE(payloadBuf.length, 1);
     payloadBuf.copy(frame, 5);
 
@@ -134,14 +127,18 @@ export class QuotaService {
           let offset = 0;
           let rawJson = '';
 
-          while (offset + 5 <= full.length) {
-            const flags = full.readUInt8(offset);
-            const len = full.readUInt32BE(offset + 1);
-            offset += 5;
-            const data = full.subarray(offset, offset + len);
-            offset += len;
-            if (flags === 0) {
-              rawJson = data.toString('utf8');
+          if (full.length > 0 && full[0] === 0x7b) {
+            rawJson = full.toString('utf8');
+          } else {
+            while (offset + 5 <= full.length) {
+              const flags = full.readUInt8(offset);
+              const len = full.readUInt32BE(offset + 1);
+              offset += 5;
+              const data = full.subarray(offset, offset + len);
+              offset += len;
+              if (flags === 0) {
+                rawJson = data.toString('utf8');
+              }
             }
           }
 
@@ -188,99 +185,139 @@ export class QuotaService {
     });
   }
 
-  public renderProgressBar(fraction: number, length = 10): string {
-    const clamped = Math.max(0, Math.min(1, fraction));
-    const filled = Math.round(clamped * length);
-    const empty = length - filled;
-    return '█'.repeat(filled) + '░'.repeat(empty);
-  }
-
-  public formatResetTime(isoStr?: string): string {
+  public formatResetCompact(isoStr?: string): string {
     if (!isoStr) return '';
     const diff = new Date(isoStr).getTime() - Date.now();
-    if (diff <= 0) return 'refreshes now';
+    if (diff <= 0) return 'now';
     const mins = Math.floor(diff / 60000);
-    if (mins < 60) return `resets in ${mins}m`;
+    if (mins < 60) return `${mins}m`;
     const hours = Math.floor(mins / 60);
     const remMins = mins % 60;
-    if (hours < 24) return `resets in ${hours}h ${remMins}m`;
+    if (hours < 24) return `${hours}h ${remMins}m`;
     const days = Math.floor(hours / 24);
     const remHours = hours % 24;
-    return `resets in ${days}d ${remHours}h`;
+    return `${days}d ${remHours}h`;
+  }
+
+  public parseMetrics(quota: QuotaSummary | null): CachedQuotaMetric {
+    if (!quota || !quota.groups || quota.groups.length === 0) {
+      return {
+        plan: '—',
+        gemini: '—',
+        claudeGpt: '—',
+        argon: '—',
+        updatedAt: Date.now()
+      };
+    }
+
+    const plan = quota.hasArgonGroup ? 'Pro' : 'Ultra';
+    let gemini = '—';
+    let claudeGpt = '—';
+    let argon = quota.hasArgonGroup ? '—' : 'included';
+
+    for (const group of quota.groups) {
+      const name = group.displayName.toLowerCase();
+      if (name.includes('argon')) {
+        const b = group.buckets[0];
+        if (b) {
+          const pct = Math.round((b.remainingFraction || 0) * 100);
+          const r = this.formatResetCompact(b.resetTime);
+          argon = `${pct}%` + (r ? ` (${r})` : '');
+        }
+      } else if (name.includes('claude') || name.includes('gpt')) {
+        const weekly = group.buckets.find((b) => b.window === 'weekly') || group.buckets[0];
+        if (weekly) {
+          const pct = Math.round((weekly.remainingFraction || 0) * 100);
+          const r = this.formatResetCompact(weekly.resetTime);
+          claudeGpt = `${pct}%` + (r ? ` (${r})` : '');
+        }
+      } else if (name.includes('gemini')) {
+        const b5h = group.buckets.find((b) => b.window === '5h');
+        const bWeekly = group.buckets.find((b) => b.window === 'weekly');
+        const p5h = b5h ? `${Math.round((b5h.remainingFraction || 0) * 100)}%` : null;
+        const pWk = bWeekly ? `${Math.round((bWeekly.remainingFraction || 0) * 100)}%` : null;
+        if (p5h && pWk) {
+          gemini = `${p5h} (5h) · ${pWk} (7d)`;
+        } else if (pWk) {
+          gemini = `${pWk} (7d)`;
+        }
+      }
+    }
+
+    return {
+      plan,
+      gemini,
+      claudeGpt,
+      argon,
+      updatedAt: Date.now()
+    };
   }
 
   public getQuickSummaryLine(quota: QuotaSummary | null): string {
-    if (!quota || quota.groups.length === 0) return '';
-    const parts: string[] = [];
-
-    for (const group of quota.groups) {
-      const weeklyBucket = group.buckets.find((b) => b.window === 'weekly') || group.buckets[0];
-      if (weeklyBucket) {
-        const pct = Math.round((weeklyBucket.remainingFraction || 0) * 100);
-        const name = group.displayName.includes('Gemini 4 Argon')
-          ? 'Argon'
-          : group.displayName.includes('Claude')
-          ? 'Claude/GPT'
-          : 'Gemini';
-        parts.push(`${name}: ${pct}%`);
-      }
+    const m = this.parseMetrics(quota);
+    if (m.plan === '—') return '';
+    const parts = [`Gemini: ${m.gemini}`, `Claude/GPT: ${m.claudeGpt}`];
+    if (m.argon !== 'included' && m.argon !== '—') {
+      parts.push(`Argon: ${m.argon}`);
     }
-
     return parts.join(' | ');
   }
 
-  public buildMarkdownTooltip(
-    profileName: string,
-    email: string,
-    isExpired: boolean,
-    quota: QuotaSummary | null
+  public buildAccountsHoverTooltip(
+    profiles: ProfileMetadata[],
+    activeProfileId: string | null,
+    liveEmail: string | null,
+    liveQuota: QuotaSummary | null
   ): vscode.MarkdownString {
     const md = new vscode.MarkdownString();
     md.isTrusted = true;
+    md.supportHtml = false;
 
-    md.appendMarkdown(`### Charlier Profile: ${profileName}\n\n`);
-    md.appendMarkdown(`• **Account:** \`${email}\`\n`);
-    md.appendMarkdown(`• **Status:** ${isExpired ? '⚠️ Token Expired' : '✅ Active'}\n`);
+    md.appendMarkdown(`### Antigravity accounts\n\n`);
 
-    if (quota && quota.groups.length > 0) {
-      md.appendMarkdown(`• **Tier:** **${quota.tier}**\n\n`);
-      md.appendMarkdown(`---\n\n`);
-      md.appendMarkdown(`#### Model Quotas & Limits\n\n`);
-
-      for (const group of quota.groups) {
-        const isArgon = group.displayName.toLowerCase().includes('argon');
-        const isClaudeGpt = group.displayName.toLowerCase().includes('claude') || group.displayName.toLowerCase().includes('gpt');
-        
-        let header = `**${group.displayName}**`;
-        if (isArgon) {
-          header += ` *(Dedicated Pro Weekly)*`;
-        } else if (isClaudeGpt) {
-          header += ` *(Opus, Sonnet, GPT-OSS)*`;
-        } else {
-          header += quota.hasArgonGroup ? ` *(Flash, Pro — Argon separate)*` : ` *(Argon included)*`;
-        }
-
-        md.appendMarkdown(`${header}\n`);
-
-        for (const bucket of group.buckets) {
-          const windowLabel = bucket.window === '5h' ? '5-Hour' : 'Weekly';
-          if (bucket.disabled) {
-            md.appendMarkdown(`• ${windowLabel}: *(Limit reached / Paused)*\n`);
-          } else {
-            const fraction = bucket.remainingFraction ?? 0;
-            const pct = Math.round(fraction * 100);
-            const bar = this.renderProgressBar(fraction, 10);
-            const resetStr = this.formatResetTime(bucket.resetTime);
-            md.appendMarkdown(`• ${windowLabel}: \`${bar}\` **${pct}%** *(${resetStr})*\n`);
-          }
-        }
-        md.appendMarkdown(`\n`);
-      }
-    } else {
-      md.appendMarkdown(`\n`);
+    if (profiles.length === 0 && !liveEmail) {
+      md.appendMarkdown(`*No active account loaded.*\n\n`);
+      md.appendMarkdown(`[Sign in to Antigravity](command:charlier.addAccount)`);
+      return md;
     }
 
-    md.appendMarkdown(`---\n\n*Click to switch or manage profiles*`);
+    // Markdown table
+    md.appendMarkdown(`| | Profile | Plan | Gemini | Claude & GPT | Argon |\n`);
+    md.appendMarkdown(`|:--:|:---|:--:|:---|:---|:---|\n`);
+
+    const liveMetrics = this.parseMetrics(liveQuota);
+
+    // List all profiles
+    for (const p of profiles) {
+      const isActive =
+        p.id === activeProfileId ||
+        (liveEmail && p.email.toLowerCase() === liveEmail.toLowerCase());
+
+      const icon = isActive ? `$(pass-filled~charts-green)` : `$(circle-outline)`;
+      const name = isActive
+        ? `**${p.name}**`
+        : `[${p.name}](command:charlier.switchProfileDirect?%22${encodeURIComponent(p.id)}%22)`;
+
+      const metrics = isActive ? liveMetrics : p.cachedQuota || { plan: '—', gemini: '—', claudeGpt: '—', argon: '—' };
+
+      md.appendMarkdown(
+        `| ${icon} | ${name} | ${metrics.plan} | ${metrics.gemini} | ${metrics.claudeGpt} | ${metrics.argon} |\n`
+      );
+    }
+
+    // If live session is not yet saved as a profile
+    if (liveEmail && !profiles.some((p) => p.email.toLowerCase() === liveEmail.toLowerCase())) {
+      const short = liveEmail.split('@')[0];
+      md.appendMarkdown(
+        `| $(pass-filled~charts-green) | *${short} (unsaved)* | ${liveMetrics.plan} | ${liveMetrics.gemini} | ${liveMetrics.claudeGpt} | ${liveMetrics.argon} |\n`
+      );
+    }
+
+    md.appendMarkdown(`\n---\n\n`);
+    md.appendMarkdown(
+      `[Manage profiles](command:charlier.switchProfile) · [Refresh limits](command:charlier.refreshQuota) · [+ Add account](command:charlier.addAccount)\n`
+    );
+
     return md;
   }
 }

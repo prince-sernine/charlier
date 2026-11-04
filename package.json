@@ -39,6 +39,16 @@
         "category": "Charlier"
       },
       {
+        "command": "charlier.refreshQuota",
+        "title": "Charlier: Refresh Limits",
+        "category": "Charlier"
+      },
+      {
+        "command": "charlier.renameProfile",
+        "title": "Charlier: Rename Profile",
+        "category": "Charlier"
+      },
+      {
         "command": "charlier.saveProfile",
         "title": "Charlier: Save Current Profile",
         "category": "Charlier"

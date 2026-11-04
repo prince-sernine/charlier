@@ -1,3 +1,11 @@
+export interface CachedQuotaMetric {
+  plan: string;
+  gemini: string;
+  claudeGpt: string;
+  argon: string;
+  updatedAt: number;
+}
+
 export interface ProfileMetadata {
   id: string;
   name: string;
@@ -5,6 +13,7 @@ export interface ProfileMetadata {
   createdAt: number;
   updatedAt: number;
   tokenExpiryDate?: number;
+  cachedQuota?: CachedQuotaMetric;
 }
 
 export interface CharlierState {
@@ -41,5 +50,3 @@ export interface QuotaSummary {
   hasArgonGroup: boolean;
   fetchedAt: number;
 }
-
-
