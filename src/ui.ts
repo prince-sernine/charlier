@@ -169,15 +169,15 @@ export class UIController {
         if (isActive) {
           buttons = [graphBtn, editBtn];
           if (liveMetrics.plan !== '—') {
-            const argonPart = liveMetrics.argon !== '—' && liveMetrics.argon !== 'included' ? ` · Argon: ${liveMetrics.argon.replace(/&nbsp;/g, ' ')}` : '';
-            detailText = `${liveMetrics.plan} · Gemini: ${liveMetrics.gemini.replace(/&nbsp;/g, ' ')} · Claude/GPT: ${liveMetrics.claudeGpt.replace(/&nbsp;/g, ' ')}${argonPart}`;
+            const argonPart = liveMetrics.argon !== '—' && liveMetrics.argon !== 'incl.' ? ` · Argon ${liveMetrics.argon}` : '';
+            detailText = `${liveMetrics.plan} · Gemini ${liveMetrics.gemini} · Claude ${liveMetrics.claudeGpt}${argonPart}`;
           } else {
             detailText = 'Active account';
           }
         } else if (profile.cachedQuota) {
           const q = profile.cachedQuota;
-          const argonPart = q.argon !== '—' && q.argon !== 'included' ? ` · Argon: ${q.argon.replace(/&nbsp;/g, ' ')}` : '';
-          detailText = `${q.plan} · Gemini: ${q.gemini.replace(/&nbsp;/g, ' ')}${argonPart}`;
+          const argonPart = q.argon !== '—' && q.argon !== 'incl.' ? ` · Argon ${q.argon}` : '';
+          detailText = `${q.plan} · Gemini ${q.gemini} · Claude ${q.claudeGpt}${argonPart}`;
         }
 
         items.push({
@@ -500,16 +500,17 @@ export class UIController {
         const windowLabel = bucket.window === '5h' ? '5-Hour Limit' : 'Weekly Limit';
         if (bucket.disabled) {
           items.push({
-            label: `  ${windowLabel}: Limit reached / Paused`,
+            label: `  ${windowLabel}:  ${this.quotaService.renderLinenMeter(0, 8)}   0%`,
             description: bucket.description
           });
         } else {
           const fraction = bucket.remainingFraction ?? 0;
           const pct = Math.round(fraction * 100);
+          const meter = this.quotaService.renderLinenMeter(fraction, 8);
           const resetStr = this.quotaService.formatResetCompact(bucket.resetTime);
 
           items.push({
-            label: `  ${windowLabel}: ${pct}%`,
+            label: `  ${windowLabel}:  ${meter}  ${pct}%`,
             description: resetStr ? `(resets in ${resetStr})` : undefined,
             detail: bucket.description
           });

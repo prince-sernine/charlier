@@ -185,22 +185,28 @@ export class QuotaService {
     });
   }
 
-  public formatResetCompact(isoStr?: string, nbsp = false): string {
+  public renderLinenMeter(fraction: number, length = 5): string {
+    const clamped = Math.max(0, Math.min(1, fraction));
+    const filled = Math.round(clamped * length);
+    const empty = length - filled;
+    return '▓'.repeat(filled) + '░'.repeat(empty);
+  }
+
+  public formatResetCompact(isoStr?: string): string {
     if (!isoStr) return '';
     const diff = new Date(isoStr).getTime() - Date.now();
     if (diff <= 0) return 'now';
-    const space = nbsp ? '&nbsp;' : ' ';
     const mins = Math.floor(diff / 60000);
     if (mins < 60) return `${mins}m`;
     const hours = Math.floor(mins / 60);
     const remMins = mins % 60;
-    if (hours < 24) return `${hours}h${space}${remMins}m`;
+    if (hours < 24) return `${hours}h ${remMins}m`;
     const days = Math.floor(hours / 24);
     const remHours = hours % 24;
-    return `${days}d${space}${remHours}h`;
+    return `${days}d ${remHours}h`;
   }
 
-  public parseMetrics(quota: QuotaSummary | null, nbsp = false): CachedQuotaMetric {
+  public parseMetrics(quota: QuotaSummary | null): CachedQuotaMetric {
     if (!quota || !quota.groups || quota.groups.length === 0) {
       return {
         plan: '—',
@@ -211,39 +217,35 @@ export class QuotaService {
       };
     }
 
-    const space = nbsp ? '&nbsp;' : ' ';
-    const dot = nbsp ? '&nbsp;·&nbsp;' : ' · ';
-    const plan = quota.hasArgonGroup ? 'Pro' : 'Ultra';
+    const plan = quota.hasArgonGroup ? 'PRO' : 'ULTRA';
     let gemini = '—';
     let claudeGpt = '—';
-    let argon = quota.hasArgonGroup ? '—' : 'included';
+    let argon = quota.hasArgonGroup ? '—' : 'incl.';
 
     for (const group of quota.groups) {
       const name = group.displayName.toLowerCase();
       if (name.includes('argon')) {
         const b = group.buckets[0];
         if (b) {
-          const pct = Math.round((b.remainingFraction || 0) * 100);
-          const r = this.formatResetCompact(b.resetTime, nbsp);
-          argon = `${pct}%` + (r ? `${space}(${r})` : '');
+          const frac = b.remainingFraction ?? 0;
+          const pct = Math.round(frac * 100);
+          argon = `${this.renderLinenMeter(frac, 5)} ${pct}%`;
         }
       } else if (name.includes('claude') || name.includes('gpt')) {
         const weekly = group.buckets.find((b) => b.window === 'weekly') || group.buckets[0];
         if (weekly) {
-          const pct = Math.round((weekly.remainingFraction || 0) * 100);
-          const r = this.formatResetCompact(weekly.resetTime, nbsp);
-          claudeGpt = `${pct}%` + (r ? `${space}(${r})` : '');
+          const frac = weekly.remainingFraction ?? 0;
+          const pct = Math.round(frac * 100);
+          claudeGpt = `${this.renderLinenMeter(frac, 5)} ${pct}%`;
         }
       } else if (name.includes('gemini')) {
         const b5h = group.buckets.find((b) => b.window === '5h');
-        const bWeekly = group.buckets.find((b) => b.window === 'weekly');
-        const p5h = b5h ? `${Math.round((b5h.remainingFraction || 0) * 100)}%` : null;
-        const pWk = bWeekly ? `${Math.round((bWeekly.remainingFraction || 0) * 100)}%` : null;
-        if (p5h && pWk) {
-          gemini = `${p5h}${space}(5h)${dot}${pWk}${space}(7d)`;
-        } else if (pWk) {
-          gemini = `${pWk}${space}(7d)`;
-        }
+        const bWeekly = group.buckets.find((b) => b.window === 'weekly') || group.buckets[0];
+        const f5h = b5h?.remainingFraction ?? 1;
+        const fWk = bWeekly?.remainingFraction ?? 1;
+        const minFrac = Math.min(f5h, fWk);
+        const pct = Math.round(minFrac * 100);
+        gemini = `${this.renderLinenMeter(minFrac, 5)} ${pct}%`;
       }
     }
 
@@ -257,13 +259,13 @@ export class QuotaService {
   }
 
   public getQuickSummaryLine(quota: QuotaSummary | null): string {
-    const m = this.parseMetrics(quota, false);
+    const m = this.parseMetrics(quota);
     if (m.plan === '—') return '';
-    const parts = [`Gemini: ${m.gemini}`, `Claude/GPT: ${m.claudeGpt}`];
-    if (m.argon !== 'included' && m.argon !== '—') {
+    const parts = [`Gemini: ${m.gemini}`, `Claude: ${m.claudeGpt}`];
+    if (m.argon !== 'incl.' && m.argon !== '—') {
       parts.push(`Argon: ${m.argon}`);
     }
-    return parts.join(' | ');
+    return parts.join(' · ');
   }
 
   private padTableCell(content: string): string {
@@ -288,73 +290,141 @@ export class QuotaService {
       ]
     };
 
-    md.appendMarkdown(`### Antigravity accounts\n\n`);
+    const activeProfile = activeProfileId
+      ? profiles.find((p) => p.id === activeProfileId)
+      : (liveEmail ? profiles.find((p) => p.email.toLowerCase() === liveEmail.toLowerCase()) : null);
 
-    if (profiles.length === 0 && !liveEmail) {
-      md.appendMarkdown(`*No active account loaded.*\n\n`);
-      md.appendMarkdown(`[Sign in to Antigravity](command:charlier.addAccount)`);
-      return md;
+    const displayName = activeProfile?.name || (liveEmail ? liveEmail.split('@')[0] : 'Ready for login');
+    const emailDisplay = activeProfile?.email || liveEmail || 'No account active';
+    const planBadge = liveQuota ? (liveQuota.hasArgonGroup ? 'PRO' : 'ULTRA') : (activeProfile?.cachedQuota?.plan || 'PRO');
+
+    // 1. Hero Instrument Card
+    md.appendMarkdown(`### Charlier · **${displayName}** &nbsp;\`${planBadge}\`\n\n`);
+    md.appendMarkdown(`\`${emailDisplay}\` &nbsp;·&nbsp; ${liveQuota ? 'Active session' : 'Standby'}\n\n`);
+
+    if (liveQuota && liveQuota.groups && liveQuota.groups.length > 0) {
+      let geminiGroup: QuotaGroup | undefined;
+      let claudeGroup: QuotaGroup | undefined;
+      let argonGroup: QuotaGroup | undefined;
+
+      for (const g of liveQuota.groups) {
+        const n = g.displayName.toLowerCase();
+        if (n.includes('argon')) {
+          argonGroup = g;
+        } else if (n.includes('claude') || n.includes('gpt')) {
+          claudeGroup = g;
+        } else if (n.includes('gemini')) {
+          geminiGroup = g;
+        }
+      }
+
+      // Gemini row
+      if (geminiGroup) {
+        const b5h = geminiGroup.buckets.find((b) => b.window === '5h');
+        const bWk = geminiGroup.buckets.find((b) => b.window === 'weekly') || geminiGroup.buckets[0];
+        const f5h = b5h?.remainingFraction ?? 1;
+        const fWk = bWk?.remainingFraction ?? 1;
+        const minFrac = Math.min(f5h, fWk);
+        const meter = this.renderLinenMeter(minFrac, 5);
+        const pMin = Math.round(minFrac * 100);
+        const p5h = Math.round(f5h * 100);
+        const pWk = Math.round(fWk * 100);
+        const r5h = b5h?.resetTime ? this.formatResetCompact(b5h.resetTime) : '';
+        const rWk = bWk?.resetTime ? this.formatResetCompact(bWk.resetTime) : '';
+
+        const detailParts: string[] = [];
+        detailParts.push(`5h: **${p5h}%**${r5h ? ` *(${r5h})*` : ''}`);
+        detailParts.push(`7d: **${pWk}%**${rWk ? ` *(${rWk})*` : ''}`);
+
+        md.appendMarkdown(
+          `**Gemini** &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \`${meter} ${pMin}%\` &nbsp;·&nbsp; ${detailParts.join(' &nbsp;·&nbsp; ')}\n\n`
+        );
+      }
+
+      // Claude & GPT row
+      if (claudeGroup) {
+        const b = claudeGroup.buckets.find((b) => b.window === 'weekly') || claudeGroup.buckets[0];
+        const frac = b?.remainingFraction ?? 0;
+        const meter = this.renderLinenMeter(frac, 5);
+        const p = Math.round(frac * 100);
+        const r = b?.resetTime ? this.formatResetCompact(b.resetTime) : '';
+        const statusNote = frac === 0 ? 'Weekly limit reached' : 'Weekly reserve';
+
+        md.appendMarkdown(
+          `**Claude & GPT** &nbsp; \`${meter} ${p}%\` &nbsp;·&nbsp; ${statusNote}${r ? ` &nbsp;·&nbsp; resets in **${r}**` : ''}\n\n`
+        );
+      }
+
+      // Argon row
+      if (liveQuota.hasArgonGroup && argonGroup) {
+        const b = argonGroup.buckets[0];
+        const frac = b?.remainingFraction ?? 0;
+        const meter = this.renderLinenMeter(frac, 5);
+        const p = Math.round(frac * 100);
+        const r = b?.resetTime ? this.formatResetCompact(b.resetTime) : '';
+        const statusNote = frac === 0 ? 'Weekly allowance exhausted' : 'Pro weekly allowance';
+
+        md.appendMarkdown(
+          `**Argon** &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \`${meter} ${p}%\` &nbsp;·&nbsp; ${statusNote}${r ? ` &nbsp;·&nbsp; resets in **${r}**` : ''}\n\n`
+        );
+      } else if (!liveQuota.hasArgonGroup) {
+        md.appendMarkdown(
+          `**Argon** &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \`Included in Gemini pool\` &nbsp;·&nbsp; Ultra tier\n\n`
+        );
+      }
+    } else if (!liveQuota && !liveEmail) {
+      md.appendMarkdown(`*No active session detected.*\n\n[Sign in to Antigravity](command:charlier.addAccount)\n\n`);
     }
 
-    // High-contrast clean table matching native VS Code layout
-    const headers = [
-      this.padTableCell(''),
-      this.padTableCell('Profile'),
-      this.padTableCell('Plan'),
-      this.padTableCell('Gemini'),
-      this.padTableCell('Claude/GPT'),
-      this.padTableCell('Argon')
-    ];
-    const separators = [':---:', ':---', ':---:', ':---:', ':---:', ':---:'];
+    // 2. Multi-Profile Rotation Matrix (Only if 2 or more profiles or inactive profiles exist)
+    const hasMultipleProfiles = profiles.length > 1 || (profiles.length === 1 && !activeProfile);
 
-    md.appendMarkdown(`| ${headers.join(' | ')} |\n`);
-    md.appendMarkdown(`|${separators.join('|')}|\n`);
+    if (hasMultipleProfiles) {
+      md.appendMarkdown(`---\n\n`);
 
-    const liveMetrics = this.parseMetrics(liveQuota, true);
-
-    // List all profiles
-    for (const p of profiles) {
-      const isActive =
-        p.id === activeProfileId ||
-        (liveEmail && p.email.toLowerCase() === liveEmail.toLowerCase());
-
-      const status = isActive ? '$(check)' : '';
-      const switchUri = `command:charlier.switchProfileDirect?${encodeURIComponent(JSON.stringify(p.id))}`;
-      const linkTitle = p.email ? p.email.replace(/"/g, '\\"') : '';
-      const linkedName = isActive
-        ? `[**${p.name}**](${switchUri} "${linkTitle}")`
-        : `[${p.name}](${switchUri} "${linkTitle}")`;
-
-      const metrics = isActive ? liveMetrics : p.cachedQuota || { plan: '—', gemini: '—', claudeGpt: '—', argon: '—' };
-
-      const cells = [
-        this.padTableCell(status),
-        this.padTableCell(linkedName),
-        this.padTableCell(metrics.plan),
-        this.padTableCell(metrics.gemini),
-        this.padTableCell(metrics.claudeGpt),
-        this.padTableCell(metrics.argon)
+      const headers = [
+        this.padTableCell(''),
+        this.padTableCell('Profile'),
+        this.padTableCell('Plan'),
+        this.padTableCell('Gemini'),
+        this.padTableCell('Claude & GPT'),
+        this.padTableCell('Argon')
       ];
+      const separators = [':---:', ':---', ':---:', ':---:', ':---:', ':---:'];
 
-      md.appendMarkdown(`| ${cells.join(' | ')} |\n`);
+      md.appendMarkdown(`| ${headers.join(' | ')} |\n`);
+      md.appendMarkdown(`|${separators.join('|')}|\n`);
+
+      const liveMetrics = this.parseMetrics(liveQuota);
+
+      for (const p of profiles) {
+        const isActive =
+          p.id === activeProfileId ||
+          (liveEmail && p.email.toLowerCase() === liveEmail.toLowerCase());
+
+        const marker = isActive ? '●' : '○';
+        const switchUri = `command:charlier.switchProfileDirect?${encodeURIComponent(JSON.stringify(p.id))}`;
+        const linkTitle = p.email ? p.email.replace(/"/g, '\\"') : '';
+        const linkedName = isActive
+          ? `**${p.name}**`
+          : `[${p.name}](${switchUri} "${linkTitle}")`;
+
+        const metrics = isActive ? liveMetrics : p.cachedQuota || { plan: '—', gemini: '—', claudeGpt: '—', argon: '—' };
+
+        const cells = [
+          this.padTableCell(marker),
+          this.padTableCell(linkedName),
+          this.padTableCell(`\`${metrics.plan}\``),
+          this.padTableCell(`\`${metrics.gemini}\``),
+          this.padTableCell(`\`${metrics.claudeGpt}\``),
+          this.padTableCell(`\`${metrics.argon}\``)
+        ];
+
+        md.appendMarkdown(`| ${cells.join(' | ')} |\n`);
+      }
     }
 
-    // If live session is not yet saved as a profile
-    if (liveEmail && !profiles.some((p) => p.email.toLowerCase() === liveEmail.toLowerCase())) {
-      const short = liveEmail.split('@')[0];
-      const status = '$(check)';
-      const name = `*${short} (unsaved)*`;
-      const cells = [
-        this.padTableCell(status),
-        this.padTableCell(name),
-        this.padTableCell(liveMetrics.plan),
-        this.padTableCell(liveMetrics.gemini),
-        this.padTableCell(liveMetrics.claudeGpt),
-        this.padTableCell(liveMetrics.argon)
-      ];
-      md.appendMarkdown(`| ${cells.join(' | ')} |\n`);
-    }
-
+    // 3. Footer Links
     md.appendMarkdown(`\n---\n\n`);
     md.appendMarkdown(
       `[Manage profiles](command:charlier.switchProfile) · [Refresh limits](command:charlier.refreshQuota) · [+ Add account](command:charlier.addAccount)\n`
