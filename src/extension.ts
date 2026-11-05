@@ -46,7 +46,12 @@ export function activate(context: vscode.ExtensionContext): void {
       if (Array.isArray(arg) && arg.length > 0) {
         rawId = arg[0];
       }
-      const idStr = typeof rawId === 'string' ? decodeURIComponent(rawId) : String(rawId || '');
+      let idStr = typeof rawId === 'string' ? decodeURIComponent(rawId) : String(rawId || '');
+      if (idStr.startsWith('"') && idStr.endsWith('"')) {
+        try {
+          idStr = JSON.parse(idStr);
+        } catch {}
+      }
       if (idStr) {
         await uiController?.handleSwitch(idStr);
       }

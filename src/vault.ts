@@ -282,14 +282,25 @@ export class Vault {
     if (fs.existsSync(sourceKeyring)) {
       const secret = fs.readFileSync(sourceKeyring, 'utf8');
       this.keyring.write(secret);
+    } else {
+      this.keyring.delete();
     }
 
     // 2. Perform atomic file replacement on disk stores
     if (fs.existsSync(sourceAccounts)) {
       this.atomicWriteFile(accountsPath, fs.readFileSync(sourceAccounts));
+    } else if (fs.existsSync(accountsPath)) {
+      try {
+        fs.unlinkSync(accountsPath);
+      } catch {}
     }
+
     if (fs.existsSync(sourceOAuth)) {
       this.atomicWriteFile(oauthPath, fs.readFileSync(sourceOAuth));
+    } else if (fs.existsSync(oauthPath)) {
+      try {
+        fs.unlinkSync(oauthPath);
+      } catch {}
     }
 
     this.saveState({ activeProfileId: id, lastUpdated: Date.now() });

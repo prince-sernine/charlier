@@ -35,14 +35,20 @@ export class UIController {
     const state = this.vault.getState();
     const profiles = this.vault.listProfiles();
 
-    let activeProfile = state.activeProfileId
-      ? profiles.find((p) => p.id === state.activeProfileId)
-      : null;
+    let activeProfile: ProfileMetadata | null = null;
 
-    if (!activeProfile && live.email) {
+    if (live.email) {
       activeProfile = profiles.find(
         (p) => p.email.toLowerCase() === live.email!.toLowerCase()
       ) || null;
+    }
+
+    if (!activeProfile && state.activeProfileId) {
+      activeProfile = profiles.find((p) => p.id === state.activeProfileId) || null;
+    }
+
+    if (activeProfile && state.activeProfileId !== activeProfile.id) {
+      this.vault.saveState({ activeProfileId: activeProfile.id, lastUpdated: Date.now() });
     }
 
     const cachedQuota = this.quotaService.getCachedSummary();
@@ -160,23 +166,25 @@ export class UIController {
 
         for (const profile of profiles) {
           const isActive =
-            state.activeProfileId === profile.id ||
-            (live.email && profile.email.toLowerCase() === live.email.toLowerCase());
+            (live.email && profile.email.toLowerCase() === live.email.toLowerCase()) ||
+            (!live.email && state.activeProfileId === profile.id);
 
           let detailText = 'Click to activate';
           let buttons: vscode.QuickInputButton[] = [editBtn];
 
           if (isActive) {
             buttons = [graphBtn, editBtn];
-            if (metrics.plan !== '—') {
-              const argonPart = metrics.argon !== '—' && metrics.argon !== 'incl.' ? ` · Argon: ${metrics.argon}` : '';
+            if (metrics.plan !== '--') {
+              const argonVal = this.quotaService.sanitizeMetric(metrics.argon);
+              const argonPart = argonVal !== '--' && argonVal !== 'incl.' ? ` · Argon: ${argonVal}` : '';
               detailText = `${metrics.plan} · Gemini: ${metrics.gemini} · Claude: ${metrics.claudeGpt}${argonPart}`;
             } else {
               detailText = 'Active account';
             }
           } else if (profile.cachedQuota) {
             const q = profile.cachedQuota;
-            const argonPart = q.argon !== '—' && q.argon !== 'incl.' ? ` · Argon: ${q.argon}` : '';
+            const argonVal = this.quotaService.sanitizeMetric(q.argon);
+            const argonPart = argonVal !== '--' && argonVal !== 'incl.' ? ` · Argon: ${argonVal}` : '';
             detailText = `${q.plan} · Gemini: ${q.gemini} · Claude: ${q.claudeGpt}${argonPart}`;
           }
 

@@ -85,15 +85,14 @@ export class QuotaService {
     candidates.sort((a, b) => b.mtime - a.mtime);
 
     for (const cand of candidates) {
-      if (cand.pid) {
-        try {
-          process.kill(cand.pid, 0);
-          return cand;
-        } catch {}
-      }
+      if (!cand.pid) return cand;
+      try {
+        process.kill(cand.pid, 0);
+        return cand;
+      } catch {}
     }
 
-    return candidates[0];
+    return null;
   }
 
   private queryDaemonRpc<T>(daemon: DaemonInfo, rpcPath: string, payload: any): Promise<T | null> {
@@ -258,21 +257,26 @@ export class QuotaService {
     return `${days}d ${remHours}h`;
   }
 
+  public sanitizeMetric(val: string | undefined): string {
+    if (!val || val === '—' || val === 'â€”' || val === '--' || val === '-') return '--';
+    return val;
+  }
+
   public parseMetrics(quota: QuotaSummary | null): CachedQuotaMetric {
     if (!quota || !quota.groups || quota.groups.length === 0) {
       return {
-        plan: quota?.planTier || '—',
-        gemini: '—',
-        claudeGpt: '—',
-        argon: '—',
+        plan: quota?.planTier || '--',
+        gemini: '--',
+        claudeGpt: '--',
+        argon: '--',
         updatedAt: Date.now()
       };
     }
 
     const plan = quota.planTier || (quota.hasArgonGroup ? 'PRO' : 'FREE');
-    let gemini = '—';
-    let claudeGpt = '—';
-    let argon = plan === 'ULTRA' ? 'incl.' : '—';
+    let gemini = '--';
+    let claudeGpt = '--';
+    let argon = plan === 'ULTRA' ? 'incl.' : '--';
 
     for (const group of quota.groups) {
       const name = group.displayName.toLowerCase();
@@ -312,9 +316,9 @@ export class QuotaService {
 
   public getQuickSummaryLine(quota: QuotaSummary | null): string {
     const m = this.parseMetrics(quota);
-    if (m.plan === '—') return '';
+    if (m.plan === '--') return '';
     const parts = [`Gemini: ${m.gemini}`, `Claude: ${m.claudeGpt}`];
-    if (m.argon !== 'incl.' && m.argon !== '—') {
+    if (m.argon !== 'incl.' && m.argon !== '--') {
       parts.push(`Argon: ${m.argon}`);
     }
     return parts.join(' · ');
@@ -385,8 +389,8 @@ export class QuotaService {
         const rWk = bWk?.resetTime ? this.formatResetCompact(bWk.resetTime) : '';
 
         const detailParts: string[] = [];
-        detailParts.push(`5h: **${p5h}%**${r5h ? ` *(${r5h})*` : ''}`);
-        detailParts.push(`7d: **${pWk}%**${rWk ? ` *(${rWk})*` : ''}`);
+        detailParts.push(`5h: **${p5h}%**${r5h && p5h < 100 ? ` *(${r5h})*` : ''}`);
+        detailParts.push(`7d: **${pWk}%**${rWk && pWk < 100 ? ` *(${rWk})*` : ''}`);
 
         md.appendMarkdown(
           `**Gemini** &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \`${meter} ${pMin}%\` &nbsp;·&nbsp; ${detailParts.join(' &nbsp;·&nbsp; ')}\n\n`
@@ -403,7 +407,7 @@ export class QuotaService {
         const statusNote = frac === 0 ? 'Weekly limit reached' : 'Weekly reserve';
 
         md.appendMarkdown(
-          `**Claude & GPT** &nbsp; \`${meter} ${p}%\` &nbsp;·&nbsp; ${statusNote}${r ? ` &nbsp;·&nbsp; resets in **${r}**` : ''}\n\n`
+          `**Claude & GPT** &nbsp; \`${meter} ${p}%\` &nbsp;·&nbsp; ${statusNote}${r && frac < 1 ? ` &nbsp;·&nbsp; resets in **${r}**` : ''}\n\n`
         );
       }
 
@@ -417,7 +421,7 @@ export class QuotaService {
         const statusNote = frac === 0 ? 'Weekly allowance exhausted' : 'Pro weekly allowance';
 
         md.appendMarkdown(
-          `**Argon** &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \`${meter} ${p}%\` &nbsp;·&nbsp; ${statusNote}${r ? ` &nbsp;·&nbsp; resets in **${r}**` : ''}\n\n`
+          `**Argon** &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \`${meter} ${p}%\` &nbsp;·&nbsp; ${statusNote}${r && frac < 1 ? ` &nbsp;·&nbsp; resets in **${r}**` : ''}\n\n`
         );
       } else if (liveQuota.planTier === 'ULTRA') {
         md.appendMarkdown(
@@ -425,7 +429,7 @@ export class QuotaService {
         );
       } else {
         md.appendMarkdown(
-          `**Argon** &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \`—\` &nbsp;·&nbsp; Not included in Free tier\n\n`
+          `**Argon** &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \`--\` &nbsp;·&nbsp; Not included in Free tier\n\n`
         );
       }
     } else if (!liveQuota && !liveEmail) {
@@ -455,8 +459,8 @@ export class QuotaService {
 
       for (const p of profiles) {
         const isActive =
-          p.id === activeProfileId ||
-          (liveEmail && p.email.toLowerCase() === liveEmail.toLowerCase());
+          (liveEmail && p.email.toLowerCase() === liveEmail.toLowerCase()) ||
+          (!liveEmail && p.id === activeProfileId);
 
         const marker = isActive ? '$(check)' : '&nbsp;';
         const switchUri = `command:charlier.switchProfileDirect?${encodeURIComponent(JSON.stringify(p.id))}`;
@@ -465,12 +469,16 @@ export class QuotaService {
           ? `**${p.name}** &nbsp;*(current)*`
           : `[${p.name}](${switchUri} "${linkTitle}")`;
 
-        const metrics = isActive ? liveMetrics : p.cachedQuota || { plan: '—', gemini: '—', claudeGpt: '—', argon: '—' };
+        const rawMetrics = isActive ? liveMetrics : p.cachedQuota || { plan: '--', gemini: '--', claudeGpt: '--', argon: '--' };
+        const sPlan = this.sanitizeMetric(rawMetrics.plan);
+        const sGemini = this.sanitizeMetric(rawMetrics.gemini);
+        const sClaude = this.sanitizeMetric(rawMetrics.claudeGpt);
+        const sArgon = this.sanitizeMetric(rawMetrics.argon);
 
-        const planText = isActive ? `**\`${metrics.plan}\`**` : `\`${metrics.plan}\``;
-        const geminiText = isActive ? `**${metrics.gemini}**` : metrics.gemini;
-        const claudeText = isActive ? `**${metrics.claudeGpt}**` : metrics.claudeGpt;
-        const argonText = isActive ? `**${metrics.argon}**` : metrics.argon;
+        const planText = isActive ? `**\`${sPlan}\`**` : `\`${sPlan}\``;
+        const geminiText = isActive ? `**${sGemini}**` : sGemini;
+        const claudeText = isActive ? `**${sClaude}**` : sClaude;
+        const argonText = isActive ? `**${sArgon}**` : sArgon;
 
         const cells = [
           this.padTableCell(marker),
