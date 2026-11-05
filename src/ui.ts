@@ -84,19 +84,25 @@ export class UIController {
       try {
         const quota = await this.quotaService.getQuotaSummary();
         if (seq === this.updateSeq && quota) {
-          if (activeProfile) {
-            // Cache metrics on the profile for future offline / inactive table rendering
+          const emailMatches =
+            !quota.email ||
+            !activeProfile ||
+            !activeProfile.email ||
+            quota.email.toLowerCase() === activeProfile.email.toLowerCase();
+
+          if (emailMatches && activeProfile) {
+            // Only cache if the daemon is actually authenticated to this active profile
             const metrics = this.quotaService.parseMetrics(quota);
             this.vault.updateProfileCachedQuota(activeProfile.id, metrics);
           }
 
-          // Update hover panel with fresh live table
+          // Update hover panel with fresh live table only if email matches
           const refreshedProfiles = this.vault.listProfiles();
           this.statusBarItem.tooltip = this.quotaService.buildAccountsHoverTooltip(
             refreshedProfiles,
             activeProfile ? activeProfile.id : null,
             live.email,
-            quota
+            emailMatches ? quota : null
           );
         }
       } catch {
@@ -169,31 +175,33 @@ export class UIController {
             (live.email && profile.email.toLowerCase() === live.email.toLowerCase()) ||
             (!live.email && state.activeProfileId === profile.id);
 
-          let detailText = 'Click to activate';
-          let buttons: vscode.QuickInputButton[] = [editBtn];
+          const planName = isActive
+            ? (metrics.plan !== '--' ? metrics.plan : (profile.cachedQuota?.plan || 'PRO'))
+            : (profile.cachedQuota?.plan || 'FREE');
+
+          // Always provide both View Quotas [graphBtn] and Rename [editBtn] across all accounts
+          const buttons: vscode.QuickInputButton[] = [graphBtn, editBtn];
+
+          let icon: vscode.ThemeIcon;
+          let description: string;
+          let detailText: string;
 
           if (isActive) {
-            buttons = [graphBtn, editBtn];
-            if (metrics.plan !== '--') {
-              const argonVal = this.quotaService.sanitizeMetric(metrics.argon);
-              const argonPart = argonVal !== '--' && argonVal !== 'incl.' ? ` · Argon: ${argonVal}` : '';
-              detailText = `$(check) Active Profile · ${metrics.plan} · Gemini: ${metrics.gemini} · Claude: ${metrics.claudeGpt}${argonPart}`;
-            } else {
-              detailText = '$(check) Current Active Profile';
-            }
-          } else if (profile.cachedQuota) {
-            const q = profile.cachedQuota;
-            const argonVal = this.quotaService.sanitizeMetric(q.argon);
-            const argonPart = argonVal !== '--' && argonVal !== 'incl.' ? ` · Argon: ${argonVal}` : '';
-            detailText = `${q.plan} · Gemini: ${q.gemini} · Claude: ${q.claudeGpt}${argonPart}`;
+            // One prominent green checkmark icon. No cheesy duplicate checkmark in detail.
+            icon = new vscode.ThemeIcon('check', new vscode.ThemeColor('charts.green'));
+            description = `${profile.email}  ·  [Active]`;
+            detailText = `Active Session · Antigravity Connected · ${planName} Plan`;
+          } else {
+            // Actionable swap icon in theme accent blue. No ugly person avatar.
+            icon = new vscode.ThemeIcon('arrow-swap', new vscode.ThemeColor('textLink.foreground'));
+            description = profile.email;
+            detailText = `$(arrow-swap) Switch to this account · ${planName} Plan`;
           }
 
           result.push({
             label: profile.name,
-            iconPath: isActive
-              ? new vscode.ThemeIcon('check', new vscode.ThemeColor('charts.green'))
-              : new vscode.ThemeIcon('account'),
-            description: profile.email + (isActive ? '  ·  [Active]' : ''),
+            iconPath: icon,
+            description,
             detail: detailText,
             actionType: 'switch',
             profileId: profile.id,
@@ -273,7 +281,7 @@ export class UIController {
       if (!e.item.profileId) return;
 
       if (e.button === graphBtn) {
-        await this.showQuotaDetails();
+        await this.showQuotaDetails(e.item.profileId);
       } else if (e.button === editBtn) {
         await this.handleRename(e.item.profileId);
       }
@@ -384,34 +392,35 @@ export class UIController {
     }
 
     try {
-      const meta = this.vault.switchProfile(profileId);
+      const meta = await this.vault.switchProfile(profileId);
       this.quotaService.invalidate();
-      await this.update();
 
       const config = vscode.workspace.getConfiguration('charlier');
       const autoRestart = config.get<boolean>('autoRestartExtensionHost', true);
 
       if (autoRestart) {
         vscode.window.setStatusBarMessage(
-          `$(check) Switched to profile "${meta.name}" · Reloading Antigravity...`,
-          4000
+          `$(check) Switched to profile "${meta.name}" · Restarting Antigravity...`,
+          3000
         );
-        // Soft reload extension host: 0 tabs closed, no window flash, instant Antigravity re-authentication
+        // Instant non-blocking extension host restart without stalling on daemon RPC
         await vscode.commands.executeCommand('workbench.action.restartExtensionHost');
-      } else {
-        vscode.window.setStatusBarMessage(
-          `$(check) Switched to profile "${meta.name}"`,
-          4000
-        );
-        vscode.window.showInformationMessage(
-          `Switched to Antigravity profile "${meta.name}".`,
-          'Restart Extension Host'
-        ).then((choice) => {
-          if (choice === 'Restart Extension Host') {
-            vscode.commands.executeCommand('workbench.action.restartExtensionHost');
-          }
-        });
+        return;
       }
+
+      await this.update();
+      vscode.window.setStatusBarMessage(
+        `$(check) Switched to profile "${meta.name}"`,
+        4000
+      );
+      vscode.window.showInformationMessage(
+        `Switched to Antigravity profile "${meta.name}".`,
+        'Restart Extension Host'
+      ).then((choice) => {
+        if (choice === 'Restart Extension Host') {
+          vscode.commands.executeCommand('workbench.action.restartExtensionHost');
+        }
+      });
     } catch (err: any) {
       vscode.window.showErrorMessage(`Failed to switch profile: ${err.message}`);
     }
@@ -504,7 +513,67 @@ export class UIController {
     }
   }
 
-  public async showQuotaDetails(): Promise<void> {
+  public async showQuotaDetails(profileId?: string): Promise<void> {
+    const profiles = this.vault.listProfiles();
+    const live = await this.vault.getLiveSessionInfo();
+    const target = profileId ? profiles.find((p) => p.id === profileId) : null;
+    const isTargetActive = target
+      ? (live.email && target.email.toLowerCase() === live.email.toLowerCase())
+      : true;
+
+    if (!isTargetActive && target) {
+      const cached = target.cachedQuota;
+      const items: vscode.QuickPickItem[] = [];
+
+      items.push({
+        label: `Quota Snapshot · ${target.name} (${cached?.plan || 'FREE'} Plan)`,
+        kind: vscode.QuickPickItemKind.Separator
+      });
+
+      if (cached && (cached.gemini !== '--' || cached.claudeGpt !== '--')) {
+        const timeAgo = cached.updatedAt ? this.quotaService.formatTimeAgo(cached.updatedAt) : 'previously';
+        items.push({
+          label: `  Gemini Models (Flash, Pro): ${cached.gemini}`,
+          description: `Snapshot from ${timeAgo}`,
+          detail: 'Capacity recorded during last active session on this account'
+        });
+        if (cached.claudeGpt && cached.claudeGpt !== '--') {
+          items.push({
+            label: `  Claude & GPT Models: ${cached.claudeGpt}`,
+            description: `Snapshot from ${timeAgo}`,
+            detail: 'Capacity recorded during last active session on this account'
+          });
+        }
+        if (cached.argon && cached.argon !== '--' && cached.argon !== 'incl.') {
+          items.push({
+            label: `  Gemini 4 Argon: ${cached.argon}`,
+            description: `Snapshot from ${timeAgo}`,
+            detail: 'Capacity recorded during last active session on this account'
+          });
+        }
+      } else {
+        items.push({
+          label: `  No quota snapshot cached for "${target.name}"`,
+          description: 'Not yet recorded in active session',
+          detail: 'Switch to this account to query real-time quota from the Antigravity daemon'
+        });
+      }
+
+      items.push({
+        label: `$(arrow-swap) Activate "${target.name}"`,
+        description: `Switch to ${target.email}`
+      });
+
+      const choice = await vscode.window.showQuickPick(items, {
+        placeHolder: `Quota Snapshot · ${target.name} (${target.email})`
+      });
+
+      if (choice && choice.label.startsWith('$(arrow-swap)')) {
+        await this.handleSwitch(target.id);
+      }
+      return;
+    }
+
     const quota = await this.quotaService.getQuotaSummary(true);
     if (!quota || quota.groups.length === 0) {
       vscode.window.showInformationMessage('No active quota reported by daemon.');

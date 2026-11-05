@@ -1,5 +1,5 @@
 import * as os from 'os';
-import { execFileSync } from 'child_process';
+import { execFile, execFileSync } from 'child_process';
 
 const SERVICE_NAME = 'gemini';
 const ACCOUNT_NAME = 'antigravity';
@@ -200,6 +200,103 @@ if ($res) { Write-Output "OK" }
       } catch {
         return false;
       }
+    }
+
+    return false;
+  }
+
+  public async writeAsync(secret: string): Promise<boolean> {
+    const platform = os.platform();
+
+    if (platform === 'win32') {
+      return new Promise<boolean>((resolve) => {
+        try {
+          const b64 = Buffer.from(secret, 'utf8').toString('base64');
+          const script = `
+$typeDef = @'
+${PS_NATIVE_DEF}
+'@
+Add-Type -TypeDefinition $typeDef -ErrorAction SilentlyContinue
+$secret = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('${b64}'))
+$res = [NativeCred]::Write('${WIN_TARGET_NAME}', '${ACCOUNT_NAME}', $secret)
+if ($res) { Write-Output "OK" }
+`;
+          execFile(
+            'powershell.exe',
+            ['-NoProfile', '-NonInteractive', '-Command', script],
+            { windowsHide: true, timeout: 5000 },
+            (error, stdout) => {
+              if (error) {
+                resolve(false);
+              } else {
+                resolve((stdout || '').trim() === 'OK');
+              }
+            }
+          );
+        } catch {
+          resolve(false);
+        }
+      });
+    }
+
+    if (platform === 'darwin') {
+      return new Promise<boolean>((resolve) => {
+        try {
+          execFile(
+            '/usr/bin/security',
+            ['add-generic-password', '-U', '-s', SERVICE_NAME, '-a', ACCOUNT_NAME, '-w', secret],
+            { timeout: 3000 },
+            (error) => resolve(!error)
+          );
+        } catch {
+          resolve(false);
+        }
+      });
+    }
+
+    if (platform === 'linux') {
+      return new Promise<boolean>((resolve) => {
+        try {
+          const child = execFile(
+            'secret-tool',
+            ['store', '--label=Antigravity', 'service', SERVICE_NAME, 'username', ACCOUNT_NAME, 'account', ACCOUNT_NAME],
+            { timeout: 3000 },
+            (error) => resolve(!error)
+          );
+          if (child.stdin) {
+            child.stdin.write(secret);
+            child.stdin.end();
+          }
+        } catch {
+          resolve(false);
+        }
+      });
+    }
+
+    return false;
+  }
+
+  public async deleteAsync(): Promise<boolean> {
+    const platform = os.platform();
+
+    if (platform === 'win32') {
+      return new Promise<boolean>((resolve) => {
+        execFile('cmdkey.exe', [`/delete:${WIN_TARGET_NAME}`], { windowsHide: true, timeout: 3000 }, (error) => resolve(!error));
+      });
+    }
+
+    if (platform === 'darwin') {
+      return new Promise<boolean>((resolve) => {
+        execFile('/usr/bin/security', ['delete-generic-password', '-s', SERVICE_NAME, '-a', ACCOUNT_NAME], { timeout: 3000 }, (error) => resolve(!error));
+      });
+    }
+
+    if (platform === 'linux') {
+      return new Promise<boolean>((resolve) => {
+        execFile('secret-tool', ['clear', 'service', SERVICE_NAME, 'username', ACCOUNT_NAME], { timeout: 3000 }, () => {
+          execFile('secret-tool', ['clear', 'service', SERVICE_NAME, 'account', ACCOUNT_NAME], { timeout: 3000 }, (err2) => resolve(!err2));
+        });
+      });
     }
 
     return false;

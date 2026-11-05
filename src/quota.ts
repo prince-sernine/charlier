@@ -196,10 +196,20 @@ export class QuotaService {
     const teamsTier = (planInfo?.teamsTier || '').toUpperCase().trim();
     const userTierName = (userTier?.name || '').toLowerCase().trim();
     const userTierId = (userTier?.id || '').toLowerCase().trim();
+    const userEmail = (statusRes?.userStatus?.email || '').trim();
 
     let planTier: UserPlanTier = 'FREE';
 
-    if (
+    // 1. Explicit Free checks take absolute precedence
+    const isExplicitFree =
+      rawPlanName === 'free' ||
+      userTierName.includes('free') ||
+      userTierId.includes('free') ||
+      teamsTier.includes('FREE');
+
+    if (isExplicitFree) {
+      planTier = 'FREE';
+    } else if (
       rawPlanName === 'ultra' ||
       userTierName.includes('ultra') ||
       userTierId.includes('ultra') ||
@@ -207,16 +217,15 @@ export class QuotaService {
       teamsTier.includes('ULTIMATE')
     ) {
       planTier = 'ULTRA';
+    } else if (teamsTier.includes('ENTERPRISE')) {
+      planTier = 'ENTERPRISE';
     } else if (
       rawPlanName === 'pro' ||
       userTierName.includes('pro') ||
       userTierId.includes('pro') ||
-      teamsTier.includes('PRO') ||
-      hasArgonGroup
+      teamsTier.includes('PRO')
     ) {
       planTier = 'PRO';
-    } else if (teamsTier.includes('ENTERPRISE')) {
-      planTier = 'ENTERPRISE';
     } else {
       planTier = 'FREE';
     }
@@ -228,6 +237,7 @@ export class QuotaService {
       : 'Free Tier';
 
     return {
+      email: userEmail,
       tier,
       planTier,
       groups,
@@ -257,6 +267,18 @@ export class QuotaService {
     return `${days}d ${remHours}h`;
   }
 
+  public formatTimeAgo(timestamp?: number): string {
+    if (!timestamp) return 'previously';
+    const diff = Date.now() - timestamp;
+    if (diff < 60000) return 'just now';
+    const mins = Math.floor(diff / 60000);
+    if (mins < 60) return `${mins}m ago`;
+    const hours = Math.floor(mins / 60);
+    if (hours < 24) return `${hours}h ago`;
+    const days = Math.floor(hours / 24);
+    return `${days}d ago`;
+  }
+
   public sanitizeMetric(val: string | undefined): string {
     if (!val || val === '—' || val === 'â€”' || val === '--' || val === '-') return '--';
     return val;
@@ -273,7 +295,7 @@ export class QuotaService {
       };
     }
 
-    const plan = quota.planTier || (quota.hasArgonGroup ? 'PRO' : 'FREE');
+    const plan = quota.planTier || 'FREE';
     let gemini = '--';
     let claudeGpt = '--';
     let argon = plan === 'ULTRA' ? 'incl.' : '--';
@@ -352,7 +374,7 @@ export class QuotaService {
 
     const displayName = activeProfile?.name || (liveEmail ? liveEmail.split('@')[0] : 'Ready for login');
     const emailDisplay = activeProfile?.email || liveEmail || 'No account active';
-    const planBadge = liveQuota ? liveQuota.planTier : (activeProfile?.cachedQuota?.plan || 'PRO');
+    const planBadge = liveQuota ? liveQuota.planTier : (activeProfile?.cachedQuota?.plan || 'FREE');
 
     // 1. Hero Instrument Card
     md.appendMarkdown(`### Charlier &nbsp;·&nbsp; **${displayName}** &nbsp;\`${planBadge}\` &nbsp;\`ACTIVE\`\n\n`);

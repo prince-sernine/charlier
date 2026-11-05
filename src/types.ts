@@ -47,6 +47,7 @@ export interface QuotaGroup {
 export type UserPlanTier = 'FREE' | 'PRO' | 'ULTRA' | 'ENTERPRISE';
 
 export interface QuotaSummary {
+  email?: string;
   tier: 'Free Tier' | 'Pro Plan' | 'Ultra Plan' | 'Enterprise' | 'Standard';
   planTier: UserPlanTier;
   groups: QuotaGroup[];
