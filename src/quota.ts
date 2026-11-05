@@ -203,27 +203,33 @@ export class QuotaService {
     // 1. Explicit Free checks take absolute precedence
     const isExplicitFree =
       rawPlanName === 'free' ||
-      userTierName.includes('free') ||
-      userTierId.includes('free') ||
-      teamsTier.includes('FREE');
+      rawPlanName.includes('free') ||
+      teamsTier === 'TEAMS_TIER_FREE' ||
+      teamsTier.includes('FREE') ||
+      userTierName === 'free' ||
+      userTierId === 'free';
 
     if (isExplicitFree) {
       planTier = 'FREE';
     } else if (
       rawPlanName === 'ultra' ||
-      userTierName.includes('ultra') ||
-      userTierId.includes('ultra') ||
+      rawPlanName.includes('ultra') ||
       teamsTier.includes('ULTRA') ||
-      teamsTier.includes('ULTIMATE')
+      teamsTier.includes('ULTIMATE') ||
+      userTierName === 'ultra' ||
+      userTierId === 'ultra'
     ) {
       planTier = 'ULTRA';
-    } else if (teamsTier.includes('ENTERPRISE')) {
+    } else if (
+      teamsTier.includes('ENTERPRISE') ||
+      rawPlanName.includes('enterprise')
+    ) {
       planTier = 'ENTERPRISE';
     } else if (
       rawPlanName === 'pro' ||
-      userTierName.includes('pro') ||
-      userTierId.includes('pro') ||
-      teamsTier.includes('PRO')
+      teamsTier === 'TEAMS_TIER_PRO' ||
+      userTierName === 'pro' ||
+      userTierId === 'pro'
     ) {
       planTier = 'PRO';
     } else {
@@ -374,18 +380,28 @@ export class QuotaService {
 
     const displayName = activeProfile?.name || (liveEmail ? liveEmail.split('@')[0] : 'Ready for login');
     const emailDisplay = activeProfile?.email || liveEmail || 'No account active';
-    const planBadge = liveQuota ? liveQuota.planTier : (activeProfile?.cachedQuota?.plan || 'FREE');
+
+    // Strict account isolation: only treat liveQuota as valid if its email matches the active session
+    const quotaMatchesActive = Boolean(
+      liveQuota &&
+      liveQuota.email &&
+      emailDisplay &&
+      emailDisplay !== 'No account active' &&
+      liveQuota.email.toLowerCase() === emailDisplay.toLowerCase()
+    );
+    const effectiveLiveQuota = quotaMatchesActive ? liveQuota : null;
+    const planBadge = effectiveLiveQuota ? effectiveLiveQuota.planTier : (activeProfile?.cachedQuota?.plan || 'FREE');
 
     // 1. Hero Instrument Card
     md.appendMarkdown(`### Charlier &nbsp;·&nbsp; **${displayName}** &nbsp;\`${planBadge}\` &nbsp;\`ACTIVE\`\n\n`);
     md.appendMarkdown(`\`${emailDisplay}\` &nbsp;·&nbsp; **● Active Session**\n\n`);
 
-    if (liveQuota && liveQuota.groups && liveQuota.groups.length > 0) {
+    if (effectiveLiveQuota && effectiveLiveQuota.groups && effectiveLiveQuota.groups.length > 0) {
       let geminiGroup: QuotaGroup | undefined;
       let claudeGroup: QuotaGroup | undefined;
       let argonGroup: QuotaGroup | undefined;
 
-      for (const g of liveQuota.groups) {
+      for (const g of effectiveLiveQuota.groups) {
         const n = g.displayName.toLowerCase();
         if (n.includes('argon')) {
           argonGroup = g;
@@ -451,7 +467,7 @@ export class QuotaService {
       }
 
       // Argon row
-      if (liveQuota.planTier === 'PRO' && argonGroup) {
+      if (effectiveLiveQuota.planTier === 'PRO' && argonGroup) {
         const b = argonGroup.buckets[0];
         const frac = b?.remainingFraction ?? 0;
         const meter = this.renderLinenMeter(frac, 5);
@@ -465,7 +481,7 @@ export class QuotaService {
           this.padTableCell(`${statusNote}${r && frac < 1 ? ` &nbsp;·&nbsp; resets in **${r}**` : ''}`)
         ];
         md.appendMarkdown(`| ${row.join(' | ')} |\n`);
-      } else if (liveQuota.planTier === 'ULTRA') {
+      } else if (effectiveLiveQuota.planTier === 'ULTRA') {
         const row = [
           this.padTableCell('**Argon** *(Gemini 4 Argon)*'),
           this.padTableCell('`Included`'),
@@ -481,7 +497,7 @@ export class QuotaService {
         md.appendMarkdown(`| ${row.join(' | ')} |\n`);
       }
       md.appendMarkdown(`\n`);
-    } else if (!liveQuota && !liveEmail) {
+    } else if (!effectiveLiveQuota && !liveEmail) {
       md.appendMarkdown(`*No active session detected.*\n\n[Sign in to Antigravity](command:charlier.addAccount)\n\n`);
     }
 
@@ -493,7 +509,7 @@ export class QuotaService {
 
       // Detect whether Claude models exist across active session or any cached profiles
       const showClaudeColumn = Boolean(
-        liveQuota?.groups?.some(
+        effectiveLiveQuota?.groups?.some(
           (g) => g.displayName.toLowerCase().includes('claude') || g.displayName.toLowerCase().includes('gpt')
         ) ||
         profiles.some(
@@ -520,7 +536,7 @@ export class QuotaService {
       md.appendMarkdown(`| ${headers.join(' | ')} |\n`);
       md.appendMarkdown(`|${separators.join('|')}|\n`);
 
-      const liveMetrics = this.parseMetrics(liveQuota);
+      const liveMetrics = effectiveLiveQuota ? this.parseMetrics(effectiveLiveQuota) : null;
 
       for (const p of profiles) {
         const isActive =
@@ -534,7 +550,7 @@ export class QuotaService {
           ? `**${p.name}** &nbsp;\`ACTIVE\``
           : `[${p.name}](${switchUri} "${linkTitle}")`;
 
-        const rawMetrics = isActive ? liveMetrics : p.cachedQuota || { plan: '--', gemini: '--', claudeGpt: '--', argon: '--' };
+        const rawMetrics = (isActive && liveMetrics) ? liveMetrics : p.cachedQuota || { plan: '--', gemini: '--', claudeGpt: '--', argon: '--' };
         const sPlan = this.sanitizeMetric(rawMetrics.plan);
         const sGemini = this.sanitizeMetric(rawMetrics.gemini);
         const sClaude = this.sanitizeMetric(rawMetrics.claudeGpt);

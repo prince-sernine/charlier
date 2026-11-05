@@ -52,6 +52,13 @@ export class UIController {
     }
 
     const cachedQuota = this.quotaService.getCachedSummary();
+    const quotaMatchesSession = Boolean(
+      cachedQuota &&
+      cachedQuota.email &&
+      live.email &&
+      cachedQuota.email.toLowerCase() === live.email.toLowerCase()
+    );
+    const validLiveQuota = quotaMatchesSession ? cachedQuota : null;
 
     if (activeProfile) {
       this.statusBarItem.text = `$(layers) Charlier: ${activeProfile.name}`;
@@ -59,7 +66,7 @@ export class UIController {
         profiles,
         activeProfile.id,
         live.email,
-        cachedQuota
+        validLiveQuota
       );
     } else if (live.email) {
       this.statusBarItem.text = `$(layers) Charlier: ${this.truncate(live.email, 18)}`;
@@ -67,7 +74,7 @@ export class UIController {
         profiles,
         null,
         live.email,
-        cachedQuota
+        validLiveQuota
       );
     } else {
       this.statusBarItem.text = `$(account) Charlier: Ready for login`;
@@ -84,11 +91,11 @@ export class UIController {
       try {
         const quota = await this.quotaService.getQuotaSummary();
         if (seq === this.updateSeq && quota) {
-          const emailMatches =
-            !quota.email ||
-            !activeProfile ||
-            !activeProfile.email ||
-            quota.email.toLowerCase() === activeProfile.email.toLowerCase();
+          const emailMatches = Boolean(
+            quota.email &&
+            activeProfile?.email &&
+            quota.email.toLowerCase() === activeProfile.email.toLowerCase()
+          );
 
           if (emailMatches && activeProfile) {
             // Only cache if the daemon is actually authenticated to this active profile
@@ -176,7 +183,7 @@ export class UIController {
             (!live.email && state.activeProfileId === profile.id);
 
           const planName = isActive
-            ? (metrics.plan !== '--' ? metrics.plan : (profile.cachedQuota?.plan || 'PRO'))
+            ? (metrics.plan !== '--' ? metrics.plan : (profile.cachedQuota?.plan || 'FREE'))
             : (profile.cachedQuota?.plan || 'FREE');
 
           // Always provide both View Quotas [graphBtn] and Rename [editBtn] across all accounts
