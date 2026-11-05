@@ -19,7 +19,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // Watcher automatically updates the status bar and probes if new account logged in externally
   watcher = new CredentialWatcher(() => {
-    quotaService?.invalidate();
+    vaultInstance?.invalidateLiveSessionCache();
     uiController?.update();
     uiController?.checkForNewUnsavedAccount();
   });
@@ -82,6 +82,9 @@ export function activate(context: vscode.ExtensionContext): void {
         'revealFileInOS',
         vscode.Uri.file(getProfilesDir())
       );
+    }),
+    vscode.commands.registerCommand('charlier.restartExtensionHost', async () => {
+      await vscode.commands.executeCommand('workbench.action.restartExtensionHost');
     }),
     vscode.commands.registerCommand('charlier.reloadWindow', async () => {
       await vscode.commands.executeCommand('workbench.action.reloadWindow');

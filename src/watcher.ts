@@ -32,7 +32,13 @@ export class CredentialWatcher {
     const profilesDir = getProfilesDir();
     if (fs.existsSync(profilesDir)) {
       try {
-        this.profilesWatcher = fs.watch(profilesDir, { recursive: true }, () => {
+        this.profilesWatcher = fs.watch(profilesDir, { recursive: true }, (eventType, filename) => {
+          if (!filename) return;
+          const name = filename.toString();
+          // Never trigger on internal cached quota updates or temporary files
+          if (name.endsWith('metadata.json') || name.endsWith('.tmp')) {
+            return;
+          }
           this.triggerDebounced();
         });
       } catch (err) {

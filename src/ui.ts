@@ -5,7 +5,7 @@ import { QuotaService } from './quota';
 import { ProfileMetadata, QuotaSummary } from './types';
 
 interface CharlierQuickPickItem extends vscode.QuickPickItem {
-  actionType: 'switch' | 'save' | 'add' | 'delete' | 'open' | 'reload' | 'quota';
+  actionType: 'switch' | 'save' | 'add' | 'delete' | 'open' | 'reload' | 'quota' | 'restartExtensionHost';
   profileId?: string;
   isCurrentActive?: boolean;
 }
@@ -177,9 +177,9 @@ export class UIController {
             if (metrics.plan !== '--') {
               const argonVal = this.quotaService.sanitizeMetric(metrics.argon);
               const argonPart = argonVal !== '--' && argonVal !== 'incl.' ? ` · Argon: ${argonVal}` : '';
-              detailText = `${metrics.plan} · Gemini: ${metrics.gemini} · Claude: ${metrics.claudeGpt}${argonPart}`;
+              detailText = `$(check) Active Profile · ${metrics.plan} · Gemini: ${metrics.gemini} · Claude: ${metrics.claudeGpt}${argonPart}`;
             } else {
-              detailText = 'Active account';
+              detailText = '$(check) Current Active Profile';
             }
           } else if (profile.cachedQuota) {
             const q = profile.cachedQuota;
@@ -193,7 +193,7 @@ export class UIController {
             iconPath: isActive
               ? new vscode.ThemeIcon('check', new vscode.ThemeColor('charts.green'))
               : new vscode.ThemeIcon('account'),
-            description: profile.email + (isActive ? ' · Active' : ''),
+            description: profile.email + (isActive ? '  ·  [Active]' : ''),
             detail: detailText,
             actionType: 'switch',
             profileId: profile.id,
@@ -241,9 +241,16 @@ export class UIController {
       });
 
       result.push({
-        label: 'Reload window',
-        description: 'Restart language server and reload VS Code',
+        label: 'Restart extension host',
+        description: 'Soft reload Antigravity & extensions without closing tabs',
         iconPath: new vscode.ThemeIcon('refresh'),
+        actionType: 'restartExtensionHost'
+      });
+
+      result.push({
+        label: 'Reload window',
+        description: 'Restart language server and full VS Code window',
+        iconPath: new vscode.ThemeIcon('sync'),
         actionType: 'reload'
       });
 
@@ -302,6 +309,9 @@ export class UIController {
             'revealFileInOS',
             vscode.Uri.file(getProfilesDir())
           );
+          break;
+        case 'restartExtensionHost':
+          await vscode.commands.executeCommand('workbench.action.restartExtensionHost');
           break;
         case 'reload':
           await vscode.commands.executeCommand('workbench.action.reloadWindow');
@@ -378,19 +388,30 @@ export class UIController {
       this.quotaService.invalidate();
       await this.update();
 
-      vscode.window.setStatusBarMessage(
-        `$(check) Switched to profile "${meta.name}"`,
-        4000
-      );
+      const config = vscode.workspace.getConfiguration('charlier');
+      const autoRestart = config.get<boolean>('autoRestartExtensionHost', true);
 
-      vscode.window.showInformationMessage(
-        `Switched to Antigravity profile "${meta.name}".`,
-        'Reload Window'
-      ).then((choice) => {
-        if (choice === 'Reload Window') {
-          vscode.commands.executeCommand('workbench.action.reloadWindow');
-        }
-      });
+      if (autoRestart) {
+        vscode.window.setStatusBarMessage(
+          `$(check) Switched to profile "${meta.name}" · Reloading Antigravity...`,
+          4000
+        );
+        // Soft reload extension host: 0 tabs closed, no window flash, instant Antigravity re-authentication
+        await vscode.commands.executeCommand('workbench.action.restartExtensionHost');
+      } else {
+        vscode.window.setStatusBarMessage(
+          `$(check) Switched to profile "${meta.name}"`,
+          4000
+        );
+        vscode.window.showInformationMessage(
+          `Switched to Antigravity profile "${meta.name}".`,
+          'Restart Extension Host'
+        ).then((choice) => {
+          if (choice === 'Restart Extension Host') {
+            vscode.commands.executeCommand('workbench.action.restartExtensionHost');
+          }
+        });
+      }
     } catch (err: any) {
       vscode.window.showErrorMessage(`Failed to switch profile: ${err.message}`);
     }
@@ -493,7 +514,7 @@ export class UIController {
     const items: vscode.QuickPickItem[] = [];
 
     items.push({
-      label: `Antigravity Plan: ${quota.tier}`,
+      label: `Antigravity Quota Dashboard · ${quota.tier}`,
       kind: vscode.QuickPickItemKind.Separator
     });
 
@@ -501,39 +522,57 @@ export class UIController {
       const isArgon = group.displayName.toLowerCase().includes('argon');
       const isClaudeGpt = group.displayName.toLowerCase().includes('claude') || group.displayName.toLowerCase().includes('gpt');
 
-      let subheader = group.displayName;
+      let groupHeader = group.displayName.toUpperCase();
       if (isArgon) {
-        subheader += ' (Pro Weekly Allowance)';
+        groupHeader = 'GEMINI 4 ARGON · Pro Weekly Allowance';
       } else if (isClaudeGpt) {
-        subheader += ' (Opus, Sonnet, GPT-OSS)';
+        groupHeader = 'CLAUDE & GPT MODELS · Opus, Sonnet, GPT-OSS';
       } else {
-        subheader += quota.planTier === 'ULTRA' ? ' (Argon Included)' : ' (Flash, Pro)';
+        groupHeader = quota.planTier === 'ULTRA' ? 'GEMINI MODELS · Argon Included' : 'GEMINI MODELS · Flash & Pro';
       }
 
       items.push({
-        label: subheader,
+        label: groupHeader,
         kind: vscode.QuickPickItemKind.Separator
       });
 
       for (const bucket of group.buckets) {
-        const windowLabel = bucket.window === '5h' ? '5-Hour Limit' : 'Weekly Limit';
-        if (bucket.disabled) {
-          items.push({
-            label: `  ${windowLabel}:  ${this.quotaService.renderLinenMeter(0, 8)}   0%`,
-            description: bucket.description
-          });
-        } else {
-          const fraction = bucket.remainingFraction ?? 0;
-          const pct = Math.round(fraction * 100);
-          const meter = this.quotaService.renderLinenMeter(fraction, 8);
-          const resetStr = this.quotaService.formatResetCompact(bucket.resetTime);
+        const is5h = bucket.window === '5h';
+        const windowTitle = is5h ? '5-Hour Fast Pool    ' : '7-Day Rolling Pool  ';
+        const fraction = bucket.disabled ? 0 : (bucket.remainingFraction ?? 0);
+        const pct = Math.round(fraction * 100);
+        const meter = this.quotaService.renderLinenMeter(fraction, 8);
+        const resetStr = this.quotaService.formatResetCompact(bucket.resetTime);
 
-          items.push({
-            label: `  ${windowLabel}:  ${meter}  ${pct}%`,
-            description: resetStr ? `(resets in ${resetStr})` : undefined,
-            detail: bucket.description
-          });
+        let statusPill = '';
+        if (bucket.disabled) {
+          statusPill = 'Inactive (weekly reserve applied)';
+        } else if (pct === 0) {
+          statusPill = resetStr ? `Depleted · Resets in ${resetStr}` : 'Depleted';
+        } else if (pct === 100) {
+          statusPill = '100% Full Capacity';
+        } else {
+          statusPill = resetStr ? `Active · Resets in ${resetStr}` : 'Active';
         }
+
+        let scopeDetail = '';
+        if (isArgon) {
+          scopeDetail = 'Dedicated allocation for Gemini 4 Argon reasoning models';
+        } else if (isClaudeGpt) {
+          scopeDetail = is5h
+            ? 'Short-term burst limit for Claude and GPT models'
+            : 'Weekly capacity reserve for Claude Opus, Claude Sonnet, and GPT-OSS';
+        } else {
+          scopeDetail = is5h
+            ? 'Rolling 5-hour demand-smoothing pool for Gemini Flash & Pro'
+            : 'Weekly baseline capacity pool for Gemini Flash & Pro';
+        }
+
+        items.push({
+          label: `  ${windowTitle}  ${meter}  ${pct}%`,
+          description: statusPill,
+          detail: scopeDetail
+        });
       }
     }
 

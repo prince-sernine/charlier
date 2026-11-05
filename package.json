@@ -69,11 +69,26 @@
         "category": "Charlier"
       },
       {
+        "command": "charlier.restartExtensionHost",
+        "title": "Charlier: Restart Extension Host (Soft Reload)",
+        "category": "Charlier"
+      },
+      {
         "command": "charlier.reloadWindow",
         "title": "Charlier: Reload Window",
         "category": "Charlier"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Charlier",
+      "properties": {
+        "charlier.autoRestartExtensionHost": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically restart the VS Code extension host on profile switch to reload Antigravity instantly without reloading the entire window."
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run build",

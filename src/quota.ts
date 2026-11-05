@@ -346,17 +346,17 @@ export class QuotaService {
       ]
     };
 
-    const activeProfile = activeProfileId
-      ? profiles.find((p) => p.id === activeProfileId)
-      : (liveEmail ? profiles.find((p) => p.email.toLowerCase() === liveEmail.toLowerCase()) : null);
+    const activeProfile = liveEmail
+      ? profiles.find((p) => p.email.toLowerCase() === liveEmail.toLowerCase()) || (activeProfileId ? profiles.find((p) => p.id === activeProfileId) : null)
+      : (activeProfileId ? profiles.find((p) => p.id === activeProfileId) : null);
 
     const displayName = activeProfile?.name || (liveEmail ? liveEmail.split('@')[0] : 'Ready for login');
     const emailDisplay = activeProfile?.email || liveEmail || 'No account active';
     const planBadge = liveQuota ? liveQuota.planTier : (activeProfile?.cachedQuota?.plan || 'PRO');
 
     // 1. Hero Instrument Card
-    md.appendMarkdown(`### Charlier · **${displayName}** &nbsp;\`${planBadge}\`\n\n`);
-    md.appendMarkdown(`\`${emailDisplay}\` &nbsp;·&nbsp; ${liveQuota ? 'Active session' : 'Standby'}\n\n`);
+    md.appendMarkdown(`### Charlier &nbsp;·&nbsp; **${displayName}** &nbsp;\`${planBadge}\` &nbsp;\`ACTIVE\`\n\n`);
+    md.appendMarkdown(`\`${emailDisplay}\` &nbsp;·&nbsp; **● Active Session**\n\n`);
 
     if (liveQuota && liveQuota.groups && liveQuota.groups.length > 0) {
       let geminiGroup: QuotaGroup | undefined;
@@ -373,6 +373,17 @@ export class QuotaService {
           geminiGroup = g;
         }
       }
+
+      // Perfectly aligned Hero Model Table
+      const heroHeaders = [
+        this.padTableCell('Model Pool'),
+        this.padTableCell('Gauge'),
+        this.padTableCell('Capacity & Reset Window')
+      ];
+      const heroSeparators = [':---', ':---:', ':---'];
+
+      md.appendMarkdown(`| ${heroHeaders.join(' | ')} |\n`);
+      md.appendMarkdown(`|${heroSeparators.join('|')}|\n`);
 
       // Gemini row
       if (geminiGroup) {
@@ -392,23 +403,29 @@ export class QuotaService {
         detailParts.push(`5h: **${p5h}%**${r5h && p5h < 100 ? ` *(${r5h})*` : ''}`);
         detailParts.push(`7d: **${pWk}%**${rWk && pWk < 100 ? ` *(${rWk})*` : ''}`);
 
-        md.appendMarkdown(
-          `**Gemini** &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \`${meter} ${pMin}%\` &nbsp;·&nbsp; ${detailParts.join(' &nbsp;·&nbsp; ')}\n\n`
-        );
+        const row = [
+          this.padTableCell('**Gemini** *(Flash, Pro)*'),
+          this.padTableCell(`\`${meter} ${pMin}%\``),
+          this.padTableCell(detailParts.join(' &nbsp;·&nbsp; '))
+        ];
+        md.appendMarkdown(`| ${row.join(' | ')} |\n`);
       }
 
-      // Claude & GPT row
+      // Claude & GPT row (Gracefully omitted after Nov 18 if no longer reported by daemon)
       if (claudeGroup) {
         const b = claudeGroup.buckets.find((b) => b.window === 'weekly') || claudeGroup.buckets[0];
         const frac = b?.remainingFraction ?? 0;
         const meter = this.renderLinenMeter(frac, 5);
         const p = Math.round(frac * 100);
         const r = b?.resetTime ? this.formatResetCompact(b.resetTime) : '';
-        const statusNote = frac === 0 ? 'Weekly limit reached' : 'Weekly reserve';
+        const statusNote = frac === 0 ? '**Depleted**' : 'Active reserve';
 
-        md.appendMarkdown(
-          `**Claude & GPT** &nbsp; \`${meter} ${p}%\` &nbsp;·&nbsp; ${statusNote}${r && frac < 1 ? ` &nbsp;·&nbsp; resets in **${r}**` : ''}\n\n`
-        );
+        const row = [
+          this.padTableCell('**Claude & GPT** *(Opus, Sonnet)*'),
+          this.padTableCell(`\`${meter} ${p}%\``),
+          this.padTableCell(`${statusNote}${r && frac < 1 ? ` &nbsp;·&nbsp; resets in **${r}**` : ''}`)
+        ];
+        md.appendMarkdown(`| ${row.join(' | ')} |\n`);
       }
 
       // Argon row
@@ -418,20 +435,30 @@ export class QuotaService {
         const meter = this.renderLinenMeter(frac, 5);
         const p = Math.round(frac * 100);
         const r = b?.resetTime ? this.formatResetCompact(b.resetTime) : '';
-        const statusNote = frac === 0 ? 'Weekly allowance exhausted' : 'Pro weekly allowance';
+        const statusNote = frac === 0 ? '**Depleted**' : 'Pro allowance';
 
-        md.appendMarkdown(
-          `**Argon** &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \`${meter} ${p}%\` &nbsp;·&nbsp; ${statusNote}${r && frac < 1 ? ` &nbsp;·&nbsp; resets in **${r}**` : ''}\n\n`
-        );
+        const row = [
+          this.padTableCell('**Argon** *(Gemini 4 Argon)*'),
+          this.padTableCell(`\`${meter} ${p}%\``),
+          this.padTableCell(`${statusNote}${r && frac < 1 ? ` &nbsp;·&nbsp; resets in **${r}**` : ''}`)
+        ];
+        md.appendMarkdown(`| ${row.join(' | ')} |\n`);
       } else if (liveQuota.planTier === 'ULTRA') {
-        md.appendMarkdown(
-          `**Argon** &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \`Included in Gemini pool\` &nbsp;·&nbsp; Ultra tier\n\n`
-        );
+        const row = [
+          this.padTableCell('**Argon** *(Gemini 4 Argon)*'),
+          this.padTableCell('`Included`'),
+          this.padTableCell('Bundled inside Gemini pool &nbsp;·&nbsp; Ultra tier')
+        ];
+        md.appendMarkdown(`| ${row.join(' | ')} |\n`);
       } else {
-        md.appendMarkdown(
-          `**Argon** &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \`--\` &nbsp;·&nbsp; Not included in Free tier\n\n`
-        );
+        const row = [
+          this.padTableCell('**Argon** *(Gemini 4 Argon)*'),
+          this.padTableCell('`--`'),
+          this.padTableCell('Not included in Free tier')
+        ];
+        md.appendMarkdown(`| ${row.join(' | ')} |\n`);
       }
+      md.appendMarkdown(`\n`);
     } else if (!liveQuota && !liveEmail) {
       md.appendMarkdown(`*No active session detected.*\n\n[Sign in to Antigravity](command:charlier.addAccount)\n\n`);
     }
@@ -442,15 +469,31 @@ export class QuotaService {
     if (hasMultipleProfiles) {
       md.appendMarkdown(`---\n\n`);
 
+      // Detect whether Claude models exist across active session or any cached profiles
+      const showClaudeColumn = Boolean(
+        liveQuota?.groups?.some(
+          (g) => g.displayName.toLowerCase().includes('claude') || g.displayName.toLowerCase().includes('gpt')
+        ) ||
+        profiles.some(
+          (p) => p.cachedQuota?.claudeGpt && p.cachedQuota.claudeGpt !== '--' && p.cachedQuota.claudeGpt !== '—'
+        )
+      );
+
       const headers = [
         this.padTableCell(''),
         this.padTableCell('Profile'),
         this.padTableCell('Plan'),
-        this.padTableCell('Gemini'),
-        this.padTableCell('Claude'),
-        this.padTableCell('Argon')
+        this.padTableCell('Gemini')
       ];
-      const separators = [':---:', ':---', ':---:', ':---:', ':---:', ':---:'];
+      const separators = [':---:', ':---', ':---:', ':---:'];
+
+      if (showClaudeColumn) {
+        headers.push(this.padTableCell('Claude'));
+        separators.push(':---:');
+      }
+
+      headers.push(this.padTableCell('Argon'));
+      separators.push(':---:');
 
       md.appendMarkdown(`| ${headers.join(' | ')} |\n`);
       md.appendMarkdown(`|${separators.join('|')}|\n`);
@@ -466,7 +509,7 @@ export class QuotaService {
         const switchUri = `command:charlier.switchProfileDirect?${encodeURIComponent(JSON.stringify(p.id))}`;
         const linkTitle = p.email ? p.email.replace(/"/g, '\\"') : '';
         const linkedName = isActive
-          ? `**${p.name}** &nbsp;*(current)*`
+          ? `**${p.name}** &nbsp;\`ACTIVE\``
           : `[${p.name}](${switchUri} "${linkTitle}")`;
 
         const rawMetrics = isActive ? liveMetrics : p.cachedQuota || { plan: '--', gemini: '--', claudeGpt: '--', argon: '--' };
@@ -484,12 +527,20 @@ export class QuotaService {
           this.padTableCell(marker),
           this.padTableCell(linkedName),
           this.padTableCell(planText),
-          this.padTableCell(geminiText),
-          this.padTableCell(claudeText),
-          this.padTableCell(argonText)
+          this.padTableCell(geminiText)
         ];
 
+        if (showClaudeColumn) {
+          cells.push(this.padTableCell(claudeText));
+        }
+
+        cells.push(this.padTableCell(argonText));
+
         md.appendMarkdown(`| ${cells.join(' | ')} |\n`);
+      }
+
+      if (profiles.length > 3) {
+        md.appendMarkdown(`\n*${profiles.length} profiles in vault · Click any name to switch · Scroll table if needed*\n`);
       }
     }
 

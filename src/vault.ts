@@ -11,10 +11,17 @@ import { KeyringManager } from './keyring';
 
 export class Vault {
   private keyring: KeyringManager;
+  private cachedLiveSession: LiveSessionInfo | null = null;
+  private cachedLiveSessionTime = 0;
 
   constructor(keyring: KeyringManager) {
     this.keyring = keyring;
     this.ensureDirectories();
+  }
+
+  public invalidateLiveSessionCache(): void {
+    this.cachedLiveSession = null;
+    this.cachedLiveSessionTime = 0;
   }
 
   public ensureDirectories(): void {
@@ -24,80 +31,78 @@ export class Vault {
     }
   }
 
-  public getLiveSessionInfo(): LiveSessionInfo {
+  public getLiveSessionInfo(force = false): LiveSessionInfo {
+    const now = Date.now();
+    if (!force && this.cachedLiveSession && now - this.cachedLiveSessionTime < 4000) {
+      return this.cachedLiveSession;
+    }
+
     let email: string | null = null;
     let tokenExpiryDate: number | null = null;
     let hasOAuthCreds = false;
     let hasRefreshToken = false;
 
-    // Check OS Keyring first (source of truth for Antigravity)
-    const keyringRaw = this.keyring.read();
-    if (keyringRaw) {
+    // Fast path: inspect google_accounts.json first (0.05ms)
+    const accountsPath = getActiveGoogleAccountsPath();
+    if (fs.existsSync(accountsPath)) {
       try {
-        const parsedKeyring = JSON.parse(keyringRaw);
-        if (typeof parsedKeyring.id_token_email === 'string' && parsedKeyring.id_token_email.trim()) {
-          email = parsedKeyring.id_token_email.trim();
+        const raw = fs.readFileSync(accountsPath, 'utf8');
+        const parsed = JSON.parse(raw);
+        if (typeof parsed?.active === 'string' && parsed.active.trim()) {
+          email = parsed.active.trim();
         }
-        if (parsedKeyring.token) {
-          hasOAuthCreds = true;
-          if (parsedKeyring.token.refresh_token) {
-            hasRefreshToken = true;
-          }
-          if (typeof parsedKeyring.token.expiry === 'string') {
-            tokenExpiryDate = new Date(parsedKeyring.token.expiry).getTime();
-          }
-        }
-      } catch {
-        // Corrupted keyring payload
-      }
+      } catch {}
     }
 
-    // Fallback to google_accounts.json
-    if (!email) {
-      const accountsPath = getActiveGoogleAccountsPath();
-      if (fs.existsSync(accountsPath)) {
+    // Fast path: inspect oauth_creds.json (0.05ms)
+    const oauthPath = getActiveOAuthCredsPath();
+    if (fs.existsSync(oauthPath)) {
+      try {
+        const raw = fs.readFileSync(oauthPath, 'utf8');
+        const parsed = JSON.parse(raw);
+        hasOAuthCreds = true;
+        if (parsed?.refresh_token) {
+          hasRefreshToken = true;
+        }
+        if (typeof parsed?.expiry_date === 'number') {
+          tokenExpiryDate = parsed.expiry_date;
+        }
+      } catch {}
+    }
+
+    // Only if disk information is missing do we query OS Keyring fallback
+    if (!email || !hasOAuthCreds) {
+      const keyringRaw = this.keyring.read();
+      if (keyringRaw) {
         try {
-          const raw = fs.readFileSync(accountsPath, 'utf8');
-          const parsed = JSON.parse(raw);
-          if (typeof parsed?.active === 'string' && parsed.active.trim()) {
-            email = parsed.active.trim();
+          const parsedKeyring = JSON.parse(keyringRaw);
+          if (!email && typeof parsedKeyring.id_token_email === 'string' && parsedKeyring.id_token_email.trim()) {
+            email = parsedKeyring.id_token_email.trim();
           }
-        } catch {
-          // Inaccessible
-        }
+          if (parsedKeyring.token) {
+            hasOAuthCreds = true;
+            if (parsedKeyring.token.refresh_token) {
+              hasRefreshToken = true;
+            }
+            if (typeof parsedKeyring.token.expiry === 'string' && !tokenExpiryDate) {
+              tokenExpiryDate = new Date(parsedKeyring.token.expiry).getTime();
+            }
+          }
+        } catch {}
       }
     }
 
-    // Fallback to oauth_creds.json
-    if (!hasOAuthCreds || !hasRefreshToken) {
-      const oauthPath = getActiveOAuthCredsPath();
-      if (fs.existsSync(oauthPath)) {
-        try {
-          const raw = fs.readFileSync(oauthPath, 'utf8');
-          const parsed = JSON.parse(raw);
-          hasOAuthCreds = true;
-          if (parsed?.refresh_token) {
-            hasRefreshToken = true;
-          }
-          if (typeof parsed?.expiry_date === 'number' && !tokenExpiryDate) {
-            tokenExpiryDate = parsed.expiry_date;
-          }
-        } catch {
-          // Inaccessible
-        }
-      }
-    }
-
-    const now = Date.now();
-    // Only flag expired if there's no refresh token to auto-renew access tokens
     const isExpired = hasOAuthCreds && !hasRefreshToken && tokenExpiryDate !== null && tokenExpiryDate <= now;
 
-    return {
+    this.cachedLiveSession = {
       email,
       hasOAuthCreds,
       tokenExpiryDate,
       isExpired
     };
+    this.cachedLiveSessionTime = now;
+
+    return this.cachedLiveSession;
   }
 
   public listProfiles(): ProfileMetadata[] {
@@ -200,6 +205,7 @@ export class Vault {
 
     fs.writeFileSync(targetMeta, JSON.stringify(metadata, null, 2), 'utf8');
     this.saveState({ activeProfileId: id, lastUpdated: now });
+    this.invalidateLiveSessionCache();
 
     return metadata;
   }
@@ -258,6 +264,7 @@ export class Vault {
 
     fs.writeFileSync(targetMeta, JSON.stringify(metadata, null, 2), 'utf8');
     this.saveState({ activeProfileId: id, lastUpdated: now });
+    this.invalidateLiveSessionCache();
 
     return metadata;
   }
@@ -304,6 +311,7 @@ export class Vault {
     }
 
     this.saveState({ activeProfileId: id, lastUpdated: Date.now() });
+    this.invalidateLiveSessionCache();
     return meta;
   }
 
@@ -316,6 +324,7 @@ export class Vault {
     if (state.activeProfileId === id) {
       this.saveState({ activeProfileId: null, lastUpdated: Date.now() });
     }
+    this.invalidateLiveSessionCache();
   }
 
   public renameProfile(id: string, newName: string): ProfileMetadata {
@@ -339,6 +348,15 @@ export class Vault {
     if (!fs.existsSync(metaPath)) return;
     try {
       const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8')) as ProfileMetadata;
+      if (
+        meta.cachedQuota &&
+        meta.cachedQuota.plan === cachedQuota.plan &&
+        meta.cachedQuota.gemini === cachedQuota.gemini &&
+        meta.cachedQuota.claudeGpt === cachedQuota.claudeGpt &&
+        meta.cachedQuota.argon === cachedQuota.argon
+      ) {
+        return;
+      }
       meta.cachedQuota = cachedQuota;
       fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf8');
     } catch {}
@@ -382,6 +400,7 @@ export class Vault {
     }
 
     this.saveState({ activeProfileId: null, lastUpdated: Date.now() });
+    this.invalidateLiveSessionCache();
   }
 
   private atomicWriteFile(targetPath: string, data: Buffer): void {
