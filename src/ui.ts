@@ -169,15 +169,21 @@ export class UIController {
     const buildItems = (metrics: CachedQuotaMetric): CharlierQuickPickItem[] => {
       const result: CharlierQuickPickItem[] = [];
 
-      // 1. Profiles Section
+      // 1. Profiles Section (Active pinned at top, no redundant 'Profiles' separator)
       if (profiles.length > 0) {
-        result.push({
-          label: 'Profiles',
-          kind: vscode.QuickPickItemKind.Separator,
-          actionType: 'switch'
+        const sortedProfiles = [...profiles].sort((a, b) => {
+          const aActive =
+            (live.email && a.email.toLowerCase() === live.email.toLowerCase()) ||
+            (!live.email && state.activeProfileId === a.id);
+          const bActive =
+            (live.email && b.email.toLowerCase() === live.email.toLowerCase()) ||
+            (!live.email && state.activeProfileId === b.id);
+          if (aActive && !bActive) return -1;
+          if (!aActive && bActive) return 1;
+          return (b.updatedAt || 0) - (a.updatedAt || 0);
         });
 
-        for (const profile of profiles) {
+        for (const profile of sortedProfiles) {
           const isActive =
             (live.email && profile.email.toLowerCase() === live.email.toLowerCase()) ||
             (!live.email && state.activeProfileId === profile.id);
@@ -199,10 +205,10 @@ export class UIController {
             description = `${profile.email}  ·  [Active]`;
             detailText = `Active Session · Antigravity Connected · ${planName} Plan`;
           } else {
-            // Actionable swap icon in theme accent blue. No ugly person avatar.
+            // Actionable swap icon in theme accent blue. Restrained typography with no duplicate icon in detail.
             icon = new vscode.ThemeIcon('arrow-swap', new vscode.ThemeColor('textLink.foreground'));
             description = profile.email;
-            detailText = `$(arrow-swap) Switch to this account · ${planName} Plan`;
+            detailText = `Switch to this account · ${planName} Plan`;
           }
 
           result.push({

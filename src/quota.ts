@@ -538,7 +538,24 @@ export class QuotaService {
 
       const liveMetrics = effectiveLiveQuota ? this.parseMetrics(effectiveLiveQuota) : null;
 
-      for (const p of profiles) {
+      // Sort so active profile is pinned at top, followed by most recently active
+      const sortedProfiles = [...profiles].sort((a, b) => {
+        const aActive =
+          (liveEmail && a.email.toLowerCase() === liveEmail.toLowerCase()) ||
+          (!liveEmail && a.id === activeProfileId);
+        const bActive =
+          (liveEmail && b.email.toLowerCase() === liveEmail.toLowerCase()) ||
+          (!liveEmail && b.id === activeProfileId);
+        if (aActive && !bActive) return -1;
+        if (!aActive && bActive) return 1;
+        return (b.updatedAt || 0) - (a.updatedAt || 0);
+      });
+
+      const maxHoverDisplay = 4;
+      const displayProfiles = sortedProfiles.slice(0, maxHoverDisplay);
+      const overflowCount = sortedProfiles.length - displayProfiles.length;
+
+      for (const p of displayProfiles) {
         const isActive =
           (liveEmail && p.email.toLowerCase() === liveEmail.toLowerCase()) ||
           (!liveEmail && p.id === activeProfileId);
@@ -577,8 +594,10 @@ export class QuotaService {
         md.appendMarkdown(`| ${cells.join(' | ')} |\n`);
       }
 
-      if (profiles.length > 3) {
-        md.appendMarkdown(`\n*${profiles.length} profiles in vault · Click any name to switch · Scroll table if needed*\n`);
+      if (overflowCount > 0) {
+        md.appendMarkdown(
+          `\n*+ ${overflowCount} more account${overflowCount > 1 ? 's' : ''} in vault* &nbsp;·&nbsp; [View all in menu](command:charlier.switchProfile)\n`
+        );
       }
     }
 
