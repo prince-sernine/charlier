@@ -109,7 +109,7 @@ if ($val) { Write-Output $val }
         const out = execFileSync(
           '/usr/bin/security',
           ['find-generic-password', '-s', SERVICE_NAME, '-a', ACCOUNT_NAME, '-w'],
-          { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }
+          { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] }
         );
         return out && out.trim() ? out.trim() : null;
       } catch {
@@ -119,11 +119,26 @@ if ($val) { Write-Output $val }
 
     if (platform === 'linux') {
       try {
-        const out = execFileSync(
-          'secret-tool',
-          ['lookup', 'service', SERVICE_NAME, 'account', ACCOUNT_NAME],
-          { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }
-        );
+        // zalando/go-keyring on Linux indexes by 'username', while standard schemas use 'account'
+        let out = '';
+        try {
+          out = execFileSync(
+            'secret-tool',
+            ['lookup', 'service', SERVICE_NAME, 'username', ACCOUNT_NAME],
+            { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] }
+          );
+        } catch {}
+
+        if (!out || !out.trim()) {
+          try {
+            out = execFileSync(
+              'secret-tool',
+              ['lookup', 'service', SERVICE_NAME, 'account', ACCOUNT_NAME],
+              { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] }
+            );
+          } catch {}
+        }
+
         return out && out.trim() ? out.trim() : null;
       } catch {
         return null;
@@ -164,8 +179,8 @@ if ($res) { Write-Output "OK" }
       try {
         execFileSync(
           '/usr/bin/security',
-          ['add-generic-password', '-s', SERVICE_NAME, '-a', ACCOUNT_NAME, '-w', secret, '-U'],
-          { stdio: ['ignore', 'ignore', 'ignore'] }
+          ['add-generic-password', '-U', '-s', SERVICE_NAME, '-a', ACCOUNT_NAME, '-w', secret],
+          { timeout: 3000, stdio: ['ignore', 'ignore', 'ignore'] }
         );
         return true;
       } catch {
@@ -175,10 +190,11 @@ if ($res) { Write-Output "OK" }
 
     if (platform === 'linux') {
       try {
+        // Store with both username and account attributes for universal Secret Service compatibility
         execFileSync(
           'secret-tool',
-          ['store', '--label=Antigravity', 'service', SERVICE_NAME, 'account', ACCOUNT_NAME],
-          { input: secret, stdio: ['pipe', 'ignore', 'ignore'] }
+          ['store', '--label=Antigravity', 'service', SERVICE_NAME, 'username', ACCOUNT_NAME, 'account', ACCOUNT_NAME],
+          { input: secret, timeout: 3000, stdio: ['pipe', 'ignore', 'ignore'] }
         );
         return true;
       } catch {
@@ -211,7 +227,7 @@ if ($res) { Write-Output "OK" }
         execFileSync(
           '/usr/bin/security',
           ['delete-generic-password', '-s', SERVICE_NAME, '-a', ACCOUNT_NAME],
-          { stdio: ['ignore', 'ignore', 'ignore'] }
+          { timeout: 3000, stdio: ['ignore', 'ignore', 'ignore'] }
         );
         return true;
       } catch {
@@ -221,11 +237,20 @@ if ($res) { Write-Output "OK" }
 
     if (platform === 'linux') {
       try {
-        execFileSync(
-          'secret-tool',
-          ['clear', 'service', SERVICE_NAME, 'account', ACCOUNT_NAME],
-          { stdio: ['ignore', 'ignore', 'ignore'] }
-        );
+        try {
+          execFileSync(
+            'secret-tool',
+            ['clear', 'service', SERVICE_NAME, 'username', ACCOUNT_NAME],
+            { timeout: 3000, stdio: ['ignore', 'ignore', 'ignore'] }
+          );
+        } catch {}
+        try {
+          execFileSync(
+            'secret-tool',
+            ['clear', 'service', SERVICE_NAME, 'account', ACCOUNT_NAME],
+            { timeout: 3000, stdio: ['ignore', 'ignore', 'ignore'] }
+          );
+        } catch {}
         return true;
       } catch {
         return false;
