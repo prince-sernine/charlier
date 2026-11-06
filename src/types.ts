@@ -1,8 +1,13 @@
+export type UserPlanTier = 'FREE' | 'PRO' | 'ULTRA' | 'ENTERPRISE';
+
 export interface CachedQuotaMetric {
   plan: string;
   gemini: string;
   claudeGpt: string;
   argon: string;
+  geminiReset?: string;
+  claudeReset?: string;
+  argonReset?: string;
   updatedAt: number;
 }
 
@@ -13,7 +18,13 @@ export interface ProfileMetadata {
   createdAt: number;
   updatedAt: number;
   tokenExpiryDate?: number;
+  planOverride?: UserPlanTier;
   cachedQuota?: CachedQuotaMetric;
+}
+
+export interface PrepareNewLoginResult {
+  backedUpProfile: ProfileMetadata | null;
+  wasExisting: boolean;
 }
 
 export interface CharlierState {
@@ -43,8 +54,6 @@ export interface QuotaGroup {
   description: string;
   buckets: QuotaBucket[];
 }
-
-export type UserPlanTier = 'FREE' | 'PRO' | 'ULTRA' | 'ENTERPRISE';
 
 export interface QuotaSummary {
   email?: string;

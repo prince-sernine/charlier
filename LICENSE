@@ -1,21 +1,65 @@
-MIT License
+Charlier Source-Available License
+Version 1.0, November 2026
 
-Copyright (c) 2026 Sernine
+Copyright (c) 2026 Sernine (@prince-sernine)
+Original author and owner of https://github.com/prince-sernine/charlier
+All rights reserved except as expressly granted below.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+1. Ownership and Pseudonymous Authorship
+For the purposes of the Berne Convention for the Protection of Literary and
+Artistic Works (Article 15(3)), the Indian Copyright Act, 1957 (Sections 23
+and 54(b)), and the United States Copyright Act (17 U.S.C. Section 302(c)),
+"Sernine" is the pseudonymous identity of the natural person who controls the
+GitHub account https://github.com/prince-sernine and its associated
+cryptographic keys, in whom all right, title, and interest in this software,
+its source code, architecture, and visual assets (collectively, the "Software")
+exclusively vest.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+2. Grant of Personal & Audit License
+Subject to the restrictions in Section 3, the Copyright Holder grants you a
+non-exclusive, royalty-free, revocable, worldwide license to:
+  (a) Inspect, read, and audit the source code of the Software;
+  (b) Install and run unmodified official releases of the Software published
+      by Sernine;
+  (c) Compile and modify the Software strictly for your own personal,
+      individual, non-commercial use on devices you personally own or control;
+  (d) Fork the official repository on GitHub solely for the purpose of
+      developing and submitting Pull Requests back to the official repository
+      at https://github.com/prince-sernine/charlier.
 
+3. Strict Prohibition on Redistribution, Cloning, and Competing Derivatives
+You may NOT, under any circumstances, without prior written permission from
+the Copyright Holder:
+  (a) Publish, upload, distribute, sublicense, sell, or host copies of the
+      Software (whether unmodified or modified) on the Visual Studio
+      Marketplace, Open VSX Registry, npm, or any other public or private
+      extension marketplace, package registry, or binary distribution channel;
+  (b) Copy, extract, adapt, port, or re-implement the Software's source code,
+      credential-switching architecture, keyring synchronization logic,
+      upstream quota engine, or user interface into any other extension,
+      plugin, or publicly distributed software product (even under a different
+      name, publisher identity, or icon);
+  (c) Remove, alter, or obscure any copyright, attribution, or license notices
+      in the Software;
+  (d) Use the "Charlier" name, the "Sernine" publisher identity, or the
+      Software's icons and visual assets to endorse, promote, or distribute any
+      software.
+
+4. Contributions
+Any Pull Request, patch, or contribution you intentionally submit to the
+official repository shall be licensed to the Copyright Holder under a
+perpetual, worldwide, irrevocable, royalty-free, transferable license with the
+right to relicense, distribute, and include in official releases.
+
+5. Termination
+Your rights under this License terminate automatically and immediately without
+notice if you breach any term of Section 3.
+
+6. Disclaimer of Warranty and Limitation of Liability
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT. IN NO EVENT SHALL THE
+AUTHOR OR COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM,
+OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.

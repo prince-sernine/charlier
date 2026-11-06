@@ -2,6 +2,10 @@
 .vscode-test/**
 src/**
 src-native/**
+scripts/**
+art/**
+graft/**
+.ignore
 tsconfig.json
 esbuild.config.mjs
 *.local.md

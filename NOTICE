@@ -1,0 +1,15 @@
+Charlier: Antigravity Account Switcher
+Copyright (c) 2026 Sernine (@prince-sernine)
+Repository: https://github.com/prince-sernine/charlier
+
+Ownership & Attribution Notice:
+This software was created by and is the exclusive intellectual property of
+Sernine, the natural person controlling https://github.com/prince-sernine.
+
+Marketplace & Logic Protection Notice:
+Charlier is made source-available so users and security researchers can inspect
+and audit how credentials are handled locally. Under the Charlier
+Source-Available License (see LICENSE), copying this codebase or its underlying
+logic into derivative extensions, or redistributing modified or renamed copies
+on the Visual Studio Marketplace, Open VSX Registry, or any other public
+extension registry, is strictly prohibited.

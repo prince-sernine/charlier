@@ -4,6 +4,7 @@
   "description": "Instant, zero-dependency account switcher and profile vault for Google Antigravity.",
   "version": "0.1.0",
   "publisher": "Sernine",
+  "license": "SEE LICENSE IN LICENSE",
   "repository": {
     "type": "git",
     "url": "https://github.com/prince-sernine/charlier"

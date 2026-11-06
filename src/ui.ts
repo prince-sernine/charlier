@@ -2,10 +2,19 @@ import * as vscode from 'vscode';
 import { Vault } from './vault';
 import { getProfilesDir } from './constants';
 import { QuotaService } from './quota';
-import { ProfileMetadata, QuotaSummary } from './types';
+import { ProfileMetadata, QuotaSummary, CachedQuotaMetric } from './types';
 
 interface CharlierQuickPickItem extends vscode.QuickPickItem {
-  actionType: 'switch' | 'save' | 'add' | 'delete' | 'open' | 'reload' | 'quota' | 'restartExtensionHost';
+  actionType:
+    | 'switch'
+    | 'save'
+    | 'add'
+    | 'delete'
+    | 'open'
+    | 'reload'
+    | 'quota'
+    | 'refreshAll'
+    | 'restartExtensionHost';
   profileId?: string;
   isCurrentActive?: boolean;
 }
@@ -16,6 +25,8 @@ export class UIController {
   private quotaService: QuotaService;
   private promptedEmails = new Set<string>();
   private updateSeq = 0;
+  private isAddingAccount = false;
+  private suppressUnsavedPromptUntil = 0;
 
   constructor(vault: Vault, quotaService: QuotaService) {
     this.vault = vault;
@@ -31,32 +42,34 @@ export class UIController {
 
   public async update(): Promise<void> {
     const seq = ++this.updateSeq;
-    const live = this.vault.getLiveSessionInfo();
+    const live = await this.vault.getLiveSessionInfoAsync();
     const state = this.vault.getState();
     const profiles = this.vault.listProfiles();
 
     let activeProfile: ProfileMetadata | null = null;
 
     if (live.email) {
-      activeProfile = profiles.find(
-        (p) => p.email.toLowerCase() === live.email!.toLowerCase()
-      ) || null;
-    }
-
-    if (!activeProfile && state.activeProfileId) {
+      activeProfile =
+        profiles.find((p) => p.email.toLowerCase() === live.email!.toLowerCase()) ||
+        null;
+    } else if (state.activeProfileId) {
       activeProfile = profiles.find((p) => p.id === state.activeProfileId) || null;
     }
 
     if (activeProfile && state.activeProfileId !== activeProfile.id) {
-      this.vault.saveState({ activeProfileId: activeProfile.id, lastUpdated: Date.now() });
+      this.vault.saveState({
+        activeProfileId: activeProfile.id,
+        lastUpdated: Date.now()
+      });
     }
 
     const cachedQuota = this.quotaService.getCachedSummary();
+    const effectiveActiveEmail = activeProfile?.email || live.email;
     const quotaMatchesSession = Boolean(
       cachedQuota &&
-      cachedQuota.email &&
-      live.email &&
-      cachedQuota.email.toLowerCase() === live.email.toLowerCase()
+        cachedQuota.email &&
+        effectiveActiveEmail &&
+        cachedQuota.email.toLowerCase() === effectiveActiveEmail.toLowerCase()
     );
     const validLiveQuota = quotaMatchesSession ? cachedQuota : null;
 
@@ -65,11 +78,12 @@ export class UIController {
       this.statusBarItem.tooltip = this.quotaService.buildAccountsHoverTooltip(
         profiles,
         activeProfile.id,
-        live.email,
+        live.email || activeProfile.email,
         validLiveQuota
       );
     } else if (live.email) {
-      this.statusBarItem.text = `$(layers) Charlier: ${this.truncate(live.email, 18)}`;
+      const shortHandle = this.truncate(live.email.split('@')[0], 14);
+      this.statusBarItem.text = `$(sparkle) Charlier: ${shortHandle} · Unsaved`;
       this.statusBarItem.tooltip = this.quotaService.buildAccountsHoverTooltip(
         profiles,
         null,
@@ -86,29 +100,61 @@ export class UIController {
       );
     }
 
-    // Query live quota asynchronously
+    // Background refresh for inactive profiles (respects 45s per-profile cooldown)
+    if (profiles.length > 0) {
+      this.quotaService
+        .refreshAllInactiveProfiles(
+          profiles,
+          effectiveActiveEmail,
+          activeProfile?.id || null,
+          this.vault,
+          false
+        )
+        .then(() => {
+          if (seq === this.updateSeq) {
+            const latestProfiles = this.vault.listProfiles();
+            const latestSummary = this.quotaService.getCachedSummary();
+            const latestMatches = Boolean(
+              latestSummary &&
+                latestSummary.email &&
+                effectiveActiveEmail &&
+                latestSummary.email.toLowerCase() === effectiveActiveEmail.toLowerCase()
+            );
+            this.statusBarItem.tooltip = this.quotaService.buildAccountsHoverTooltip(
+              latestProfiles,
+              activeProfile ? activeProfile.id : null,
+              live.email || activeProfile?.email || null,
+              latestMatches ? latestSummary : null
+            );
+          }
+        })
+        .catch(() => {});
+    }
+
+    // Query live daemon quota asynchronously for the active session
     if ((activeProfile || live.email) && !live.isExpired) {
       try {
         const quota = await this.quotaService.getQuotaSummary();
         if (seq === this.updateSeq && quota) {
           const emailMatches = Boolean(
             quota.email &&
-            activeProfile?.email &&
-            quota.email.toLowerCase() === activeProfile.email.toLowerCase()
+              effectiveActiveEmail &&
+              quota.email.toLowerCase() === effectiveActiveEmail.toLowerCase()
           );
 
           if (emailMatches && activeProfile) {
-            // Only cache if the daemon is actually authenticated to this active profile
-            const metrics = this.quotaService.parseMetrics(quota);
+            const metrics = this.quotaService.parseMetrics(
+              quota,
+              activeProfile.planOverride
+            );
             this.vault.updateProfileCachedQuota(activeProfile.id, metrics);
           }
 
-          // Update hover panel with fresh live table only if email matches
           const refreshedProfiles = this.vault.listProfiles();
           this.statusBarItem.tooltip = this.quotaService.buildAccountsHoverTooltip(
             refreshedProfiles,
             activeProfile ? activeProfile.id : null,
-            live.email,
+            live.email || activeProfile?.email || null,
             emailMatches ? quota : null
           );
         }
@@ -119,7 +165,11 @@ export class UIController {
   }
 
   public async checkForNewUnsavedAccount(): Promise<void> {
-    const live = this.vault.getLiveSessionInfo();
+    if (this.isAddingAccount || Date.now() < this.suppressUnsavedPromptUntil) {
+      return;
+    }
+
+    const live = await this.vault.getLiveSessionInfoAsync();
     if (!live.email) return;
 
     const emailLower = live.email.toLowerCase();
@@ -131,9 +181,9 @@ export class UIController {
     if (!isSaved) {
       this.promptedEmails.add(emailLower);
       const choice = await vscode.window.showInformationMessage(
-        `Charlier detected an active Antigravity account (${live.email}). Save as profile?`,
+        `New Antigravity account online (${live.email}). Save it as a profile in your vault?`,
         'Save Profile',
-        'Not Now'
+        'Later'
       );
 
       if (choice === 'Save Profile') {
@@ -143,17 +193,16 @@ export class UIController {
   }
 
   public async showQuickPickMenu(): Promise<void> {
-    const live = this.vault.getLiveSessionInfo();
+    const live = await this.vault.getLiveSessionInfoAsync();
     const state = this.vault.getState();
-    const profiles = this.vault.listProfiles();
+    let profiles = this.vault.listProfiles();
 
-    // Synchronous immediate open with cached quota - zero lag on click
-    let liveQuota: QuotaSummary | null = this.quotaService.getCachedSummary();
-    let liveMetrics = this.quotaService.parseMetrics(liveQuota);
+    const liveQuota: QuotaSummary | null = this.quotaService.getCachedSummary();
+    const liveMetrics = this.quotaService.parseMetrics(liveQuota);
 
     const graphBtn: vscode.QuickInputButton = {
       iconPath: new vscode.ThemeIcon('graph'),
-      tooltip: 'View quota details'
+      tooltip: 'View or refresh quota details'
     };
 
     const editBtn: vscode.QuickInputButton = {
@@ -162,16 +211,51 @@ export class UIController {
     };
 
     const quickPick = vscode.window.createQuickPick<CharlierQuickPickItem>();
-    quickPick.placeholder = 'Select an Antigravity account profile or management action';
+    quickPick.placeholder =
+      'Select an Antigravity account profile or management action';
     quickPick.matchOnDescription = true;
     quickPick.matchOnDetail = true;
 
-    const buildItems = (metrics: CachedQuotaMetric): CharlierQuickPickItem[] => {
+    let isDisposed = false;
+    quickPick.onDidHide(() => {
+      isDisposed = true;
+      quickPick.dispose();
+    });
+
+    const buildItems = (
+      currentProfiles: ProfileMetadata[],
+      metrics: CachedQuotaMetric
+    ): CharlierQuickPickItem[] => {
       const result: CharlierQuickPickItem[] = [];
 
-      // 1. Profiles Section (Active pinned at top, no redundant 'Profiles' separator)
-      if (profiles.length > 0) {
-        const sortedProfiles = [...profiles].sort((a, b) => {
+      const isSavedLive = Boolean(
+        live.email &&
+          currentProfiles.some(
+            (p) => p.email.toLowerCase() === live.email!.toLowerCase()
+          )
+      );
+      const isUnsavedActive = Boolean(live.email && !isSavedLive);
+
+      // 0. If active account is not saved in vault, pin a prominent Save card at the very top
+      if (isUnsavedActive && live.email) {
+        const handle = live.email.split('@')[0];
+        const unsavedPlan =
+          metrics.plan && metrics.plan !== '--' ? metrics.plan : 'FREE';
+        result.push({
+          label: `Save active account: ${handle}`,
+          iconPath: new vscode.ThemeIcon(
+            'sparkle',
+            new vscode.ThemeColor('charts.yellow')
+          ),
+          description: `${live.email}  ·  [Active · Not Saved]`,
+          detail: `New session online · ${unsavedPlan} Plan · Click to save this account to your vault`,
+          actionType: 'save'
+        });
+      }
+
+      // 1. Saved Profiles Section (Active pinned at top)
+      if (currentProfiles.length > 0) {
+        const sortedProfiles = [...currentProfiles].sort((a, b) => {
           const aActive =
             (live.email && a.email.toLowerCase() === live.email.toLowerCase()) ||
             (!live.email && state.activeProfileId === a.id);
@@ -185,14 +269,18 @@ export class UIController {
 
         for (const profile of sortedProfiles) {
           const isActive =
-            (live.email && profile.email.toLowerCase() === live.email.toLowerCase()) ||
+            (live.email &&
+              profile.email.toLowerCase() === live.email.toLowerCase()) ||
             (!live.email && state.activeProfileId === profile.id);
 
-          const planName = isActive
-            ? (metrics.plan !== '--' ? metrics.plan : (profile.cachedQuota?.plan || 'FREE'))
-            : (profile.cachedQuota?.plan || 'FREE');
+          const planName =
+            profile.planOverride ||
+            (isActive
+              ? metrics.plan !== '--'
+                ? metrics.plan
+                : profile.cachedQuota?.plan || 'FREE'
+              : profile.cachedQuota?.plan || 'FREE');
 
-          // Always provide both View Quotas [graphBtn] and Rename [editBtn] across all accounts
           const buttons: vscode.QuickInputButton[] = [graphBtn, editBtn];
 
           let icon: vscode.ThemeIcon;
@@ -200,15 +288,33 @@ export class UIController {
           let detailText: string;
 
           if (isActive) {
-            // One prominent green checkmark icon. No cheesy duplicate checkmark in detail.
-            icon = new vscode.ThemeIcon('check', new vscode.ThemeColor('charts.green'));
+            icon = new vscode.ThemeIcon(
+              'check',
+              new vscode.ThemeColor('charts.green')
+            );
             description = `${profile.email}  ·  [Active]`;
             detailText = `Active Session · Antigravity Connected · ${planName} Plan`;
           } else {
-            // Actionable swap icon in theme accent blue. Restrained typography with no duplicate icon in detail.
-            icon = new vscode.ThemeIcon('arrow-swap', new vscode.ThemeColor('textLink.foreground'));
+            icon = new vscode.ThemeIcon(
+              'arrow-swap',
+              new vscode.ThemeColor('textLink.foreground')
+            );
             description = profile.email;
-            detailText = `Switch to this account · ${planName} Plan`;
+            const cq = profile.cachedQuota;
+            if (cq && cq.gemini && cq.gemini !== '--') {
+              const snapAge = cq.updatedAt
+                ? this.quotaService.formatTimeAgo(cq.updatedAt)
+                : '';
+              const claudePart =
+                cq.claudeGpt && cq.claudeGpt !== '--' && planName !== 'FREE'
+                  ? ` · Claude ${cq.claudeGpt}`
+                  : '';
+              detailText = `Switch to this account · ${planName} Plan · Gemini ${cq.gemini}${claudePart}${
+                snapAge ? ` (snapped ${snapAge})` : ''
+              }`;
+            } else {
+              detailText = `Switch to this account · ${planName} Plan`;
+            }
           }
 
           result.push({
@@ -233,19 +339,30 @@ export class UIController {
 
       result.push({
         label: 'Add new account',
-        description: 'Prepare new Google sign-in',
+        description:
+          'Auto-backup current session and sign in with another Google account',
         iconPath: new vscode.ThemeIcon('add'),
         actionType: 'add'
       });
 
       result.push({
         label: 'Save session as profile',
-        description: live.email ? `Snapshot "${live.email}"` : 'Snapshot current credentials',
+        description: live.email
+          ? `Snapshot "${live.email}"`
+          : 'Snapshot current credentials',
         iconPath: new vscode.ThemeIcon('save'),
         actionType: 'save'
       });
 
-      if (profiles.length > 0) {
+      result.push({
+        label: 'Refresh all limits',
+        description:
+          'Update quotas for active session and dormant vault profiles',
+        iconPath: new vscode.ThemeIcon('refresh'),
+        actionType: 'refreshAll'
+      });
+
+      if (currentProfiles.length > 0) {
         result.push({
           label: 'Delete profile',
           description: 'Remove saved profile from vault',
@@ -263,8 +380,9 @@ export class UIController {
 
       result.push({
         label: 'Restart extension host',
-        description: 'Soft reload Antigravity & extensions without closing tabs',
-        iconPath: new vscode.ThemeIcon('refresh'),
+        description:
+          'Soft reload Antigravity & extensions without closing tabs',
+        iconPath: new vscode.ThemeIcon('debug-restart'),
         actionType: 'restartExtensionHost'
       });
 
@@ -278,17 +396,35 @@ export class UIController {
       return result;
     };
 
-    quickPick.items = buildItems(liveMetrics);
+    quickPick.items = buildItems(profiles, liveMetrics);
 
-    // Refresh non-blockingly in background
+    // Refresh active daemon and inactive profiles non-blockingly in background
     this.quotaService.getQuotaSummary().then((fresh) => {
-      if (fresh) {
+      if (!isDisposed && fresh) {
         const freshMetrics = this.quotaService.parseMetrics(fresh);
-        quickPick.items = buildItems(freshMetrics);
+        profiles = this.vault.listProfiles();
+        quickPick.items = buildItems(profiles, freshMetrics);
       }
     });
 
-    // Handle button clicks directly on rows
+    this.quotaService
+      .refreshAllInactiveProfiles(
+        profiles,
+        live.email,
+        state.activeProfileId,
+        this.vault,
+        false
+      )
+      .then(() => {
+        if (!isDisposed) {
+          profiles = this.vault.listProfiles();
+          const latestQ = this.quotaService.getCachedSummary();
+          const latestM = this.quotaService.parseMetrics(latestQ);
+          quickPick.items = buildItems(profiles, latestM);
+        }
+      })
+      .catch(() => {});
+
     quickPick.onDidTriggerItemButton(async (e) => {
       quickPick.hide();
       if (!e.item.profileId) return;
@@ -300,7 +436,6 @@ export class UIController {
       }
     });
 
-    // Handle row selections
     quickPick.onDidAccept(async () => {
       const selected = quickPick.selectedItems[0];
       quickPick.hide();
@@ -322,6 +457,9 @@ export class UIController {
         case 'add':
           await this.handleAddAccount();
           break;
+        case 'refreshAll':
+          await this.refreshQuota();
+          break;
         case 'delete':
           await this.handleDelete();
           break;
@@ -332,7 +470,9 @@ export class UIController {
           );
           break;
         case 'restartExtensionHost':
-          await vscode.commands.executeCommand('workbench.action.restartExtensionHost');
+          await vscode.commands.executeCommand(
+            'workbench.action.restartExtensionHost'
+          );
           break;
         case 'reload':
           await vscode.commands.executeCommand('workbench.action.reloadWindow');
@@ -356,7 +496,8 @@ export class UIController {
       [
         {
           label: 'View quota details',
-          description: 'Detailed 5-hour and weekly limits across all model pools',
+          description:
+            'Detailed 5-hour and weekly limits across all model pools',
           iconPath: new vscode.ThemeIcon('graph'),
           action: 'quota'
         },
@@ -367,19 +508,22 @@ export class UIController {
           action: 'rename'
         },
         {
-          label: 'Refresh limits',
-          description: 'Query live daemon for updated token limits',
+          label: 'Refresh all limits',
+          description:
+            'Query live daemon and refresh background vault snapshots',
           iconPath: new vscode.ThemeIcon('refresh'),
           action: 'refresh'
         }
       ],
-      { placeHolder: `Profile: ${profile.name} (${profile.email}) is already active` }
+      {
+        placeHolder: `Profile: ${profile.name} (${profile.email}) is already active`
+      }
     );
 
     if (!choice) return;
 
     if (choice.action === 'quota') {
-      await this.showQuotaDetails();
+      await this.showQuotaDetails(profileId);
     } else if (choice.action === 'rename') {
       await this.handleRename(profileId);
     } else if (choice.action === 'refresh') {
@@ -389,12 +533,14 @@ export class UIController {
 
   public async handleSwitch(profileId: string): Promise<void> {
     const state = this.vault.getState();
-    const live = this.vault.getLiveSessionInfo();
+    const live = await this.vault.getLiveSessionInfoAsync();
     const target = this.vault.getProfile(profileId);
 
     const isAlreadyActive =
-      state.activeProfileId === profileId ||
-      (live.email && target && live.email.toLowerCase() === target.email.toLowerCase());
+      (live.email &&
+        target &&
+        live.email.toLowerCase() === target.email.toLowerCase()) ||
+      (!live.email && state.activeProfileId === profileId);
 
     if (isAlreadyActive) {
       vscode.window.setStatusBarMessage(
@@ -405,6 +551,7 @@ export class UIController {
     }
 
     try {
+      this.suppressUnsavedPromptUntil = Date.now() + 4000;
       const meta = await this.vault.switchProfile(profileId);
       this.quotaService.invalidate();
 
@@ -416,8 +563,9 @@ export class UIController {
           `$(check) Switched to profile "${meta.name}" · Restarting Antigravity...`,
           3000
         );
-        // Instant non-blocking extension host restart without stalling on daemon RPC
-        await vscode.commands.executeCommand('workbench.action.restartExtensionHost');
+        await vscode.commands.executeCommand(
+          'workbench.action.restartExtensionHost'
+        );
         return;
       }
 
@@ -426,16 +574,22 @@ export class UIController {
         `$(check) Switched to profile "${meta.name}"`,
         4000
       );
-      vscode.window.showInformationMessage(
-        `Switched to Antigravity profile "${meta.name}".`,
-        'Restart Extension Host'
-      ).then((choice) => {
-        if (choice === 'Restart Extension Host') {
-          vscode.commands.executeCommand('workbench.action.restartExtensionHost');
-        }
-      });
+      vscode.window
+        .showInformationMessage(
+          `Switched to Antigravity profile "${meta.name}".`,
+          'Restart Extension Host'
+        )
+        .then((choice) => {
+          if (choice === 'Restart Extension Host') {
+            vscode.commands.executeCommand(
+              'workbench.action.restartExtensionHost'
+            );
+          }
+        });
     } catch (err: any) {
-      vscode.window.showErrorMessage(`Failed to switch profile: ${err.message}`);
+      vscode.window.showErrorMessage(
+        `Failed to switch profile: ${err.message}`
+      );
     }
   }
 
@@ -460,12 +614,14 @@ export class UIController {
         3000
       );
     } catch (err: any) {
-      vscode.window.showErrorMessage(`Failed to rename profile: ${err.message}`);
+      vscode.window.showErrorMessage(
+        `Failed to rename profile: ${err.message}`
+      );
     }
   }
 
   public async handleSaveCurrent(): Promise<void> {
-    const live = this.vault.getLiveSessionInfo();
+    const live = await this.vault.getLiveSessionInfoAsync();
     const defaultName = live.email
       ? live.email.includes('@')
         ? live.email.split('@')[0]
@@ -474,19 +630,25 @@ export class UIController {
 
     const name = await vscode.window.showInputBox({
       title: 'Save Profile',
-      prompt: 'Enter a profile name',
+      prompt: live.email
+        ? `Save active account (${live.email}) to your Charlier vault`
+        : 'Enter a profile name',
       value: defaultName,
-      validateInput: (value) => (!value || !value.trim() ? 'Name cannot be empty.' : null)
+      validateInput: (value) =>
+        !value || !value.trim() ? 'Name cannot be empty.' : null
     });
 
     if (!name) return;
 
     try {
-      const meta = this.vault.saveCurrentAsProfile(name.trim());
+      const meta = await this.vault.saveCurrentAsProfileAsync(name.trim());
+      if (meta.email && meta.email !== 'Unknown') {
+        this.promptedEmails.add(meta.email.toLowerCase());
+      }
       this.quotaService.invalidate();
       await this.update();
       vscode.window.setStatusBarMessage(
-        `$(check) Saved profile "${meta.name}" for ${meta.email}`,
+        `$(check) Saved profile "${meta.name}" (${meta.email})`,
         4000
       );
     } catch (err: any) {
@@ -495,93 +657,192 @@ export class UIController {
   }
 
   public async handleAddAccount(): Promise<void> {
+    if (this.isAddingAccount) return;
+    this.isAddingAccount = true;
+    this.suppressUnsavedPromptUntil = Date.now() + 6000;
+
     try {
-      this.vault.prepareNewLogin();
+      vscode.window.setStatusBarMessage(
+        '$(sync~spin) Backing up current session and preparing new login...',
+        2500
+      );
+
+      const { backedUpProfile, wasExisting } =
+        await this.vault.prepareNewLoginAsync();
       this.quotaService.invalidate();
       await this.update();
 
-      try {
-        await vscode.commands.executeCommand('antigravity.signOut');
-      } catch {}
+      // Fire signOut and panel focus concurrently without blocking if unavailable
+      Promise.allSettled([
+        vscode.commands.executeCommand('antigravity.signOut'),
+        vscode.commands.executeCommand('antigravity.panel.focus')
+      ]).catch(() => {});
 
-      try {
-        await vscode.commands.executeCommand('antigravity.panel.focus');
-      } catch {}
+      let headsUpCopy: string;
+      if (backedUpProfile && wasExisting) {
+        headsUpCopy = `Refreshed "${backedUpProfile.name}" (${backedUpProfile.email}) in your vault. Sign in with your next account in the Antigravity sidebar.`;
+      } else if (backedUpProfile && !wasExisting) {
+        headsUpCopy = `Auto-saved "${backedUpProfile.name}" (${backedUpProfile.email}) to your vault so nothing is lost. Sign in with your next account in the Antigravity sidebar.`;
+      } else {
+        headsUpCopy =
+          'Session cleared. Sign in with your Google account in the Antigravity sidebar.';
+      }
 
       vscode.window.setStatusBarMessage(
-        '$(account) Antigravity ready for new login.',
+        '$(account) Ready for new Antigravity login.',
         5000
       );
-
-      vscode.window.showInformationMessage(
-        'Antigravity is ready for a new login. Sign in via the sidebar, then save the profile.',
-        'Save Profile'
-      ).then((choice) => {
-        if (choice === 'Save Profile') {
-          this.handleSaveCurrent();
-        }
-      });
+      vscode.window.showInformationMessage(headsUpCopy);
     } catch (err: any) {
       vscode.window.showErrorMessage(`Failed to prepare login: ${err.message}`);
+    } finally {
+      this.isAddingAccount = false;
     }
   }
 
   public async showQuotaDetails(profileId?: string): Promise<void> {
     const profiles = this.vault.listProfiles();
-    const live = await this.vault.getLiveSessionInfo();
-    const target = profileId ? profiles.find((p) => p.id === profileId) : null;
+    const live = await this.vault.getLiveSessionInfoAsync();
+    const state = this.vault.getState();
+    const target = profileId
+      ? profiles.find((p) => p.id === profileId) || null
+      : null;
+
     const isTargetActive = target
-      ? (live.email && target.email.toLowerCase() === live.email.toLowerCase())
+      ? Boolean(
+          (live.email &&
+            target.email.toLowerCase() === live.email.toLowerCase()) ||
+            (!live.email && state.activeProfileId === target.id)
+        )
       : true;
 
     if (!isTargetActive && target) {
-      const cached = target.cachedQuota;
-      const items: vscode.QuickPickItem[] = [];
+      // Trigger a fresh background snapshot if never fetched or older than 45s
+      let cached = target.cachedQuota;
+      if (!cached || !cached.updatedAt || Date.now() - cached.updatedAt > 45000) {
+        vscode.window.setStatusBarMessage(
+          `$(sync~spin) Fetching latest usage for "${target.name}"...`,
+          2000
+        );
+        const refreshed = await this.quotaService.refreshInactiveProfile(
+          target,
+          this.vault,
+          false
+        );
+        if (refreshed) {
+          cached = refreshed;
+          await this.update();
+        }
+      }
+
+      const planLabel = target.planOverride || cached?.plan || 'FREE';
+      const timeAgo = cached?.updatedAt
+        ? this.quotaService.formatTimeAgo(cached.updatedAt)
+        : 'not yet recorded';
+      const items: Array<vscode.QuickPickItem & { action?: string }> = [];
 
       items.push({
-        label: `Quota Snapshot · ${target.name} (${cached?.plan || 'FREE'} Plan)`,
+        label: `Quota Snapshot · ${target.name} (${planLabel} Plan · snapped ${timeAgo})`,
         kind: vscode.QuickPickItemKind.Separator
       });
 
       if (cached && (cached.gemini !== '--' || cached.claudeGpt !== '--')) {
-        const timeAgo = cached.updatedAt ? this.quotaService.formatTimeAgo(cached.updatedAt) : 'previously';
+        const gPct = parseInt(cached.gemini, 10);
+        const gFrac = Number.isFinite(gPct) ? gPct / 100 : 0;
+        const gMeter = this.quotaService.renderLinenMeter(gFrac, 8);
+        const gReset = cached.geminiReset
+          ? this.quotaService.formatResetCompact(cached.geminiReset)
+          : '';
+
         items.push({
-          label: `  Gemini Models (Flash, Pro): ${cached.gemini}`,
-          description: `Snapshot from ${timeAgo}`,
-          detail: 'Capacity recorded during last active session on this account'
+          label: `  Gemini Models (Flash, Pro)   ${gMeter}  ${cached.gemini}`,
+          description: `${
+            gReset && gPct < 100 ? `Resets in ${gReset} · ` : ''
+          }Snapped ${timeAgo}`,
+          detail: 'First-party Gemini pool capacity'
         });
-        if (cached.claudeGpt && cached.claudeGpt !== '--') {
+
+        if (
+          planLabel !== 'FREE' &&
+          cached.claudeGpt &&
+          cached.claudeGpt !== '--'
+        ) {
+          const cPct = parseInt(cached.claudeGpt, 10);
+          const cFrac = Number.isFinite(cPct) ? cPct / 100 : 0;
+          const cMeter = this.quotaService.renderLinenMeter(cFrac, 8);
+          const cReset = cached.claudeReset
+            ? this.quotaService.formatResetCompact(cached.claudeReset)
+            : '';
+
           items.push({
-            label: `  Claude & GPT Models: ${cached.claudeGpt}`,
-            description: `Snapshot from ${timeAgo}`,
-            detail: 'Capacity recorded during last active session on this account'
+            label: `  Claude & GPT Models          ${cMeter}  ${cached.claudeGpt}`,
+            description: `${
+              cReset && cPct < 100 ? `Resets in ${cReset} · ` : ''
+            }Snapped ${timeAgo}`,
+            detail: 'Weekly reserve for Claude Opus, Sonnet, and GPT-OSS'
           });
         }
-        if (cached.argon && cached.argon !== '--' && cached.argon !== 'incl.') {
+
+        if (planLabel === 'PRO' && cached.argon && cached.argon !== '--') {
+          const aPct = parseInt(cached.argon, 10);
+          const aFrac = Number.isFinite(aPct) ? aPct / 100 : 0;
+          const aMeter = this.quotaService.renderLinenMeter(aFrac, 8);
+          const aReset = cached.argonReset
+            ? this.quotaService.formatResetCompact(cached.argonReset)
+            : '';
+
           items.push({
-            label: `  Gemini 4 Argon: ${cached.argon}`,
-            description: `Snapshot from ${timeAgo}`,
-            detail: 'Capacity recorded during last active session on this account'
+            label: `  Gemini 4 Argon               ${aMeter}  ${cached.argon}`,
+            description: `${
+              aReset && aPct < 100 ? `Resets in ${aReset} · ` : ''
+            }Last active daemon snapshot`,
+            detail: 'Pro weekly allowance for Gemini 4 Argon'
           });
         }
       } else {
         items.push({
-          label: `  No quota snapshot cached for "${target.name}"`,
-          description: 'Not yet recorded in active session',
-          detail: 'Switch to this account to query real-time quota from the Antigravity daemon'
+          label: `  No usage snapshot recorded for "${target.name}"`,
+          description: 'Click Refresh below to pull live usage from Google',
+          detail:
+            'Refreshes directly in the background without interrupting your active session'
         });
       }
 
       items.push({
-        label: `$(arrow-swap) Activate "${target.name}"`,
-        description: `Switch to ${target.email}`
+        label: 'Actions',
+        kind: vscode.QuickPickItemKind.Separator
+      });
+
+      items.push({
+        label: `$(refresh) Refresh "${target.name}" usage now`,
+        description:
+          'Pulls live Gemini & Claude limits without switching your active session',
+        action: 'refreshInactive'
+      });
+
+      items.push({
+        label: `$(arrow-swap) Switch to "${target.name}"`,
+        description: `Activate ${target.email}`,
+        action: 'switch'
       });
 
       const choice = await vscode.window.showQuickPick(items, {
-        placeHolder: `Quota Snapshot · ${target.name} (${target.email})`
+        placeHolder: `Quota Snapshot · ${target.name} (${target.email}) · Snapped ${timeAgo}`
       });
 
-      if (choice && choice.label.startsWith('$(arrow-swap)')) {
+      if (choice?.action === 'refreshInactive') {
+        vscode.window.setStatusBarMessage(
+          `$(sync~spin) Refreshing "${target.name}" usage...`,
+          2500
+        );
+        await this.quotaService.refreshInactiveProfile(target, this.vault, true);
+        await this.update();
+        vscode.window.setStatusBarMessage(
+          `$(check) Updated usage snapshot for "${target.name}".`,
+          3000
+        );
+        await this.showQuotaDetails(target.id);
+      } else if (choice?.action === 'switch') {
         await this.handleSwitch(target.id);
       }
       return;
@@ -589,7 +850,9 @@ export class UIController {
 
     const quota = await this.quotaService.getQuotaSummary(true);
     if (!quota || quota.groups.length === 0) {
-      vscode.window.showInformationMessage('No active quota reported by daemon.');
+      vscode.window.showInformationMessage(
+        'No active quota reported by daemon.'
+      );
       return;
     }
 
@@ -602,7 +865,13 @@ export class UIController {
 
     for (const group of quota.groups) {
       const isArgon = group.displayName.toLowerCase().includes('argon');
-      const isClaudeGpt = group.displayName.toLowerCase().includes('claude') || group.displayName.toLowerCase().includes('gpt');
+      const isClaudeGpt =
+        group.displayName.toLowerCase().includes('claude') ||
+        group.displayName.toLowerCase().includes('gpt');
+
+      if (quota.planTier === 'FREE' && (isArgon || isClaudeGpt)) {
+        continue;
+      }
 
       let groupHeader = group.displayName.toUpperCase();
       if (isArgon) {
@@ -610,7 +879,10 @@ export class UIController {
       } else if (isClaudeGpt) {
         groupHeader = 'CLAUDE & GPT MODELS · Opus, Sonnet, GPT-OSS';
       } else {
-        groupHeader = quota.planTier === 'ULTRA' ? 'GEMINI MODELS · Argon Included' : 'GEMINI MODELS · Flash & Pro';
+        groupHeader =
+          quota.planTier === 'ULTRA'
+            ? 'GEMINI MODELS · Argon Included'
+            : 'GEMINI MODELS · Flash & Pro';
       }
 
       items.push({
@@ -620,8 +892,10 @@ export class UIController {
 
       for (const bucket of group.buckets) {
         const is5h = bucket.window === '5h';
-        const windowTitle = is5h ? '5-Hour Fast Pool    ' : '7-Day Rolling Pool  ';
-        const fraction = bucket.disabled ? 0 : (bucket.remainingFraction ?? 0);
+        const windowTitle = is5h
+          ? '5-Hour Fast Pool    '
+          : '7-Day Rolling Pool  ';
+        const fraction = bucket.disabled ? 0 : bucket.remainingFraction ?? 0;
         const pct = Math.round(fraction * 100);
         const meter = this.quotaService.renderLinenMeter(fraction, 8);
         const resetStr = this.quotaService.formatResetCompact(bucket.resetTime);
@@ -630,7 +904,9 @@ export class UIController {
         if (bucket.disabled) {
           statusPill = 'Inactive (weekly reserve applied)';
         } else if (pct === 0) {
-          statusPill = resetStr ? `Depleted · Resets in ${resetStr}` : 'Depleted';
+          statusPill = resetStr
+            ? `Depleted · Resets in ${resetStr}`
+            : 'Depleted';
         } else if (pct === 100) {
           statusPill = '100% Full Capacity';
         } else {
@@ -639,7 +915,8 @@ export class UIController {
 
         let scopeDetail = '';
         if (isArgon) {
-          scopeDetail = 'Dedicated allocation for Gemini 4 Argon reasoning models';
+          scopeDetail =
+            'Dedicated allocation for Gemini 4 Argon reasoning models';
         } else if (isClaudeGpt) {
           scopeDetail = is5h
             ? 'Short-term burst limit for Claude and GPT models'
@@ -659,15 +936,37 @@ export class UIController {
     }
 
     await vscode.window.showQuickPick(items, {
-      placeHolder: `Antigravity Quota · ${quota.tier}`,
+      placeHolder: `Antigravity Quota · ${quota.tier} · Live from Daemon`,
       canPickMany: false
     });
   }
 
   public async refreshQuota(): Promise<void> {
+    vscode.window.setStatusBarMessage(
+      '$(sync~spin) Refreshing limits for active session and vault profiles...',
+      2500
+    );
     this.quotaService.invalidate();
+    const profiles = this.vault.listProfiles();
+    const live = await this.vault.getLiveSessionInfoAsync();
+    const state = this.vault.getState();
+
+    await Promise.allSettled([
+      this.quotaService.getQuotaSummary(true),
+      this.quotaService.refreshAllInactiveProfiles(
+        profiles,
+        live.email,
+        state.activeProfileId,
+        this.vault,
+        true
+      )
+    ]);
+
     await this.update();
-    vscode.window.setStatusBarMessage('$(refresh) Limits refreshed from daemon.', 3000);
+    vscode.window.setStatusBarMessage(
+      '$(check) Limits refreshed across active session and vault profiles.',
+      3500
+    );
   }
 
   public async handleDelete(): Promise<void> {
@@ -688,7 +987,6 @@ export class UIController {
 
     if (!picked) return;
 
-    // Explicit heads-up modal confirmation (Point 8)
     const confirm = await vscode.window.showWarningMessage(
       `Permanently delete profile "${picked.label}" (${picked.description})?\n\nThis will remove its stored credentials from ~/.gemini/charlier/.`,
       { modal: true },

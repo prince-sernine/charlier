@@ -148,6 +148,94 @@ if ($val) { Write-Output $val }
     return null;
   }
 
+  public async readAsync(): Promise<string | null> {
+    const platform = os.platform();
+
+    if (platform === 'win32') {
+      return new Promise<string | null>((resolve) => {
+        try {
+          const script = `
+$typeDef = @'
+${PS_NATIVE_DEF}
+'@
+Add-Type -TypeDefinition $typeDef -ErrorAction SilentlyContinue
+$val = [NativeCred]::Read('${WIN_TARGET_NAME}')
+if ($val) { Write-Output $val }
+`;
+          execFile(
+            'powershell.exe',
+            ['-NoProfile', '-NonInteractive', '-Command', script],
+            { encoding: 'utf8', windowsHide: true, timeout: 4000 },
+            (error, stdout) => {
+              if (error) {
+                resolve(null);
+              } else {
+                const trimmed = (stdout || '').trim();
+                resolve(trimmed ? trimmed : null);
+              }
+            }
+          );
+        } catch {
+          resolve(null);
+        }
+      });
+    }
+
+    if (platform === 'darwin') {
+      return new Promise<string | null>((resolve) => {
+        try {
+          execFile(
+            '/usr/bin/security',
+            ['find-generic-password', '-s', SERVICE_NAME, '-a', ACCOUNT_NAME, '-w'],
+            { encoding: 'utf8', timeout: 3000 },
+            (error, stdout) => {
+              if (error) {
+                resolve(null);
+              } else {
+                const trimmed = (stdout || '').trim();
+                resolve(trimmed ? trimmed : null);
+              }
+            }
+          );
+        } catch {
+          resolve(null);
+        }
+      });
+    }
+
+    if (platform === 'linux') {
+      return new Promise<string | null>((resolve) => {
+        try {
+          execFile(
+            'secret-tool',
+            ['lookup', 'service', SERVICE_NAME, 'username', ACCOUNT_NAME],
+            { encoding: 'utf8', timeout: 3000 },
+            (_err1, stdout1) => {
+              const trimmed1 = (stdout1 || '').trim();
+              if (trimmed1) {
+                resolve(trimmed1);
+                return;
+              }
+              execFile(
+                'secret-tool',
+                ['lookup', 'service', SERVICE_NAME, 'account', ACCOUNT_NAME],
+                { encoding: 'utf8', timeout: 3000 },
+                (_err2, stdout2) => {
+                  const trimmed2 = (stdout2 || '').trim();
+                  resolve(trimmed2 ? trimmed2 : null);
+                }
+              );
+            }
+          );
+        } catch {
+          resolve(null);
+        }
+      });
+    }
+
+    return null;
+  }
+
   public write(secret: string): boolean {
     const platform = os.platform();
 
