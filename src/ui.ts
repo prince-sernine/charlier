@@ -283,39 +283,20 @@ export class UIController {
 
           const buttons: vscode.QuickInputButton[] = [graphBtn, editBtn];
 
-          let icon: vscode.ThemeIcon;
-          let description: string;
-          let detailText: string;
+          const effectiveCq = isActive && metrics.gemini !== '--' ? metrics : profile.cachedQuota;
+          const icon = isActive
+            ? new vscode.ThemeIcon('check', new vscode.ThemeColor('charts.green'))
+            : new vscode.ThemeIcon('arrow-swap', new vscode.ThemeColor('textLink.foreground'));
 
-          if (isActive) {
-            icon = new vscode.ThemeIcon(
-              'check',
-              new vscode.ThemeColor('charts.green')
-            );
-            description = `${profile.email}  ·  [Active]`;
-            detailText = `Active Session · Antigravity Connected · ${planName} Plan`;
-          } else {
-            icon = new vscode.ThemeIcon(
-              'arrow-swap',
-              new vscode.ThemeColor('textLink.foreground')
-            );
-            description = profile.email;
-            const cq = profile.cachedQuota;
-            if (cq && cq.gemini && cq.gemini !== '--') {
-              const snapAge = cq.updatedAt
-                ? this.quotaService.formatTimeAgo(cq.updatedAt)
-                : '';
-              const claudePart =
-                cq.claudeGpt && cq.claudeGpt !== '--' && planName !== 'FREE'
-                  ? ` · Claude ${cq.claudeGpt}`
-                  : '';
-              detailText = `Switch to this account · ${planName} Plan · Gemini ${cq.gemini}${claudePart}${
-                snapAge ? ` (snapped ${snapAge})` : ''
-              }`;
-            } else {
-              detailText = `Switch to this account · ${planName} Plan`;
-            }
-          }
+          const description = isActive
+            ? `${profile.email}  ·  ${planName}  ·  Active`
+            : `${profile.email}  ·  ${planName}`;
+
+          const detailText = this.formatProfileDetailLine(
+            effectiveCq,
+            planName,
+            Boolean(isActive)
+          );
 
           result.push({
             label: profile.name,
@@ -402,6 +383,14 @@ export class UIController {
     this.quotaService.getQuotaSummary().then((fresh) => {
       if (!isDisposed && fresh) {
         const freshMetrics = this.quotaService.parseMetrics(fresh);
+        if (live.email && fresh.email && live.email.toLowerCase() === fresh.email.toLowerCase()) {
+          const activeProf = profiles.find(
+            (p) => p.email.toLowerCase() === live.email!.toLowerCase()
+          );
+          if (activeProf) {
+            this.vault.updateProfileCachedQuota(activeProf.id, freshMetrics);
+          }
+        }
         profiles = this.vault.listProfiles();
         quickPick.items = buildItems(profiles, freshMetrics);
       }
@@ -534,6 +523,7 @@ export class UIController {
   public async handleSwitch(profileId: string): Promise<void> {
     const state = this.vault.getState();
     const live = await this.vault.getLiveSessionInfoAsync();
+    const profiles = this.vault.listProfiles();
     const target = this.vault.getProfile(profileId);
 
     const isAlreadyActive =
@@ -552,6 +542,35 @@ export class UIController {
 
     try {
       this.suppressUnsavedPromptUntil = Date.now() + 4000;
+
+      // Auto-snapshot the outgoing active profile's live credentials and dual-window quota
+      const currentActive = live.email
+        ? profiles.find((p) => p.email.toLowerCase() === live.email!.toLowerCase()) || null
+        : state.activeProfileId
+          ? profiles.find((p) => p.id === state.activeProfileId) || null
+          : null;
+
+      if (currentActive && currentActive.id !== profileId) {
+        try {
+          const liveSummary = this.quotaService.getCachedSummary();
+          if (
+            liveSummary &&
+            liveSummary.email &&
+            currentActive.email &&
+            liveSummary.email.toLowerCase() === currentActive.email.toLowerCase()
+          ) {
+            const metrics = this.quotaService.parseMetrics(
+              liveSummary,
+              currentActive.planOverride
+            );
+            this.vault.updateProfileCachedQuota(currentActive.id, metrics);
+          }
+          await this.vault.updateProfileCredentialsAsync(currentActive.id);
+        } catch {
+          // Non-fatal: proceed with switch even if outgoing snapshot fails
+        }
+      }
+
       const meta = await this.vault.switchProfile(profileId);
       this.quotaService.invalidate();
 
@@ -700,6 +719,104 @@ export class UIController {
     }
   }
 
+  private formatProfileDetailLine(
+    cq: CachedQuotaMetric | undefined,
+    planName: string,
+    isActive: boolean
+  ): string {
+    const modeLabel = isActive ? 'Active' : 'Switch';
+    if (!cq || !cq.gemini || cq.gemini === '--') {
+      return `${modeLabel}  ·  ${planName} Plan`;
+    }
+
+    const parts: string[] = [modeLabel];
+
+    const gPct = parseInt(cq.gemini, 10);
+    const gReset = cq.geminiReset
+      ? this.quotaService.formatResetCompact(cq.geminiReset)
+      : '';
+    const gSuffix =
+      gReset && Number.isFinite(gPct) && gPct < 100 ? ` (${gReset})` : '';
+    parts.push(`Gemini ${cq.gemini}${gSuffix}`);
+
+    if (planName !== 'FREE' && cq.claudeGpt && cq.claudeGpt !== '--') {
+      const cPct = parseInt(cq.claudeGpt, 10);
+      const cReset = cq.claudeReset
+        ? this.quotaService.formatResetCompact(cq.claudeReset)
+        : '';
+      const cSuffix =
+        cReset && Number.isFinite(cPct) && cPct < 100 ? ` (${cReset})` : '';
+      parts.push(`Claude ${cq.claudeGpt}${cSuffix}`);
+    }
+
+    if (planName === 'PRO') {
+      if (cq.argon && cq.argon !== '--' && cq.argon !== 'incl.') {
+        const aPct = parseInt(cq.argon, 10);
+        const aReset = cq.argonReset
+          ? this.quotaService.formatResetCompact(cq.argonReset)
+          : '';
+        if (aPct === 0) {
+          parts.push(`Argon 0% (${aReset ? aReset : 'Depleted'})`);
+        } else {
+          const aSuffix =
+            aReset && Number.isFinite(aPct) && aPct < 100 ? ` (${aReset})` : '';
+          parts.push(`Argon ${cq.argon}${aSuffix}`);
+        }
+      } else {
+        parts.push('Argon Pro');
+      }
+    } else if (planName === 'ULTRA') {
+      parts.push('Argon Included');
+    }
+
+    if (!isActive && cq.updatedAt) {
+      parts.push(this.quotaService.formatTimeAgo(cq.updatedAt));
+    }
+
+    return parts.join('  ·  ');
+  }
+
+  private buildPoolRow(
+    icon: string,
+    poolLabel: string,
+    pctStr: string | undefined,
+    resetIso: string | undefined,
+    modelScope: string,
+    fallbackNote?: string
+  ): vscode.QuickPickItem {
+    const pct = parseInt(pctStr || '', 10);
+    if (Number.isFinite(pct)) {
+      const frac = Math.max(0, Math.min(1, pct / 100));
+      const meter = this.quotaService.renderLinenMeter(frac, 8);
+      const resetStr = resetIso
+        ? this.quotaService.formatResetCompact(resetIso)
+        : '';
+      const paddedPct = `${pct}%`.padStart(4, ' ');
+
+      let statusText: string;
+      if (pct === 0) {
+        statusText = resetStr
+          ? `Depleted · Resets in ${resetStr}`
+          : 'Depleted for weekly window';
+      } else if (pct === 100) {
+        statusText = 'Full capacity';
+      } else {
+        statusText = resetStr ? `Resets in ${resetStr}` : 'Active';
+      }
+
+      return {
+        label: `  $(${icon}) ${poolLabel.padEnd(18, ' ')} ${meter}  ${paddedPct}`,
+        description: `${statusText}  ·  ${modelScope}`
+      };
+    }
+
+    const badge = pctStr === 'incl.' ? 'INCL' : 'PRO';
+    return {
+      label: `  $(${icon}) ${poolLabel.padEnd(18, ' ')} ▒▒▒▒▒▒▒▒  ${badge.padStart(4, ' ')}`,
+      description: fallbackNote || `Included in ${modelScope}`
+    };
+  }
+
   public async showQuotaDetails(profileId?: string): Promise<void> {
     const profiles = this.vault.listProfiles();
     const live = await this.vault.getLiveSessionInfoAsync();
@@ -738,96 +855,126 @@ export class UIController {
       const planLabel = target.planOverride || cached?.plan || 'FREE';
       const timeAgo = cached?.updatedAt
         ? this.quotaService.formatTimeAgo(cached.updatedAt)
-        : 'not yet recorded';
+        : 'not yet synced';
       const items: Array<vscode.QuickPickItem & { action?: string }> = [];
 
-      items.push({
-        label: `Quota Snapshot · ${target.name} (${planLabel} Plan · snapped ${timeAgo})`,
-        kind: vscode.QuickPickItemKind.Separator
-      });
-
       if (cached && (cached.gemini !== '--' || cached.claudeGpt !== '--')) {
-        const gPct = parseInt(cached.gemini, 10);
-        const gFrac = Number.isFinite(gPct) ? gPct / 100 : 0;
-        const gMeter = this.quotaService.renderLinenMeter(gFrac, 8);
-        const gReset = cached.geminiReset
-          ? this.quotaService.formatResetCompact(cached.geminiReset)
-          : '';
+        const g5h = cached.gemini5h || cached.gemini || '--';
+        const g5hReset = cached.gemini5hReset || cached.geminiReset;
+        const g7d = cached.gemini7d || cached.gemini || '--';
+        const g7dReset = cached.gemini7dReset;
 
         items.push({
-          label: `  Gemini Models (Flash, Pro)   ${gMeter}  ${cached.gemini}`,
-          description: `${
-            gReset && gPct < 100 ? `Resets in ${gReset} · ` : ''
-          }Snapped ${timeAgo}`,
-          detail: 'First-party Gemini pool capacity'
+          label: 'GEMINI',
+          kind: vscode.QuickPickItemKind.Separator
         });
+        items.push(
+          this.buildPoolRow(
+            'pulse',
+            '5-Hour Fast Pool',
+            g5h,
+            g5hReset,
+            'Flash & Pro'
+          )
+        );
+        items.push(
+          this.buildPoolRow(
+            'calendar',
+            '7-Day Weekly Pool',
+            g7d,
+            g7dReset,
+            'Flash & Pro'
+          )
+        );
 
-        if (
-          planLabel !== 'FREE' &&
-          cached.claudeGpt &&
-          cached.claudeGpt !== '--'
-        ) {
-          const cPct = parseInt(cached.claudeGpt, 10);
-          const cFrac = Number.isFinite(cPct) ? cPct / 100 : 0;
-          const cMeter = this.quotaService.renderLinenMeter(cFrac, 8);
-          const cReset = cached.claudeReset
-            ? this.quotaService.formatResetCompact(cached.claudeReset)
-            : '';
+        if (planLabel !== 'FREE') {
+          const c5h = cached.claude5h || cached.claudeGpt || '--';
+          const c5hReset = cached.claude5hReset;
+          const c7d = cached.claude7d || cached.claudeGpt || '--';
+          const c7dReset = cached.claude7dReset || cached.claudeReset;
 
           items.push({
-            label: `  Claude & GPT Models          ${cMeter}  ${cached.claudeGpt}`,
-            description: `${
-              cReset && cPct < 100 ? `Resets in ${cReset} · ` : ''
-            }Snapped ${timeAgo}`,
-            detail: 'Weekly reserve for Claude Opus, Sonnet, and GPT-OSS'
+            label: 'CLAUDE & GPT',
+            kind: vscode.QuickPickItemKind.Separator
           });
+          items.push(
+            this.buildPoolRow(
+              'pulse',
+              '5-Hour Fast Pool',
+              c5h,
+              c5hReset,
+              'Opus, Sonnet, GPT-OSS'
+            )
+          );
+          items.push(
+            this.buildPoolRow(
+              'calendar',
+              '7-Day Weekly Pool',
+              c7d,
+              c7dReset,
+              'Opus, Sonnet, GPT-OSS'
+            )
+          );
         }
 
-        if (planLabel === 'PRO' && cached.argon && cached.argon !== '--') {
-          const aPct = parseInt(cached.argon, 10);
-          const aFrac = Number.isFinite(aPct) ? aPct / 100 : 0;
-          const aMeter = this.quotaService.renderLinenMeter(aFrac, 8);
-          const aReset = cached.argonReset
-            ? this.quotaService.formatResetCompact(cached.argonReset)
-            : '';
-
+        if (planLabel === 'PRO') {
           items.push({
-            label: `  Gemini 4 Argon               ${aMeter}  ${cached.argon}`,
-            description: `${
-              aReset && aPct < 100 ? `Resets in ${aReset} · ` : ''
-            }Last active daemon snapshot`,
-            detail: 'Pro weekly allowance for Gemini 4 Argon'
+            label: 'GEMINI 4 ARGON',
+            kind: vscode.QuickPickItemKind.Separator
           });
+          items.push(
+            this.buildPoolRow(
+              'flame',
+              '7-Day Weekly Pool',
+              cached.argon,
+              cached.argonReset,
+              'Pro weekly allowance',
+              'Included in Pro · Switch once to sync weekly meter'
+            )
+          );
+        } else if (planLabel === 'ULTRA') {
+          items.push({
+            label: 'GEMINI 4 ARGON',
+            kind: vscode.QuickPickItemKind.Separator
+          });
+          items.push(
+            this.buildPoolRow(
+              'sparkle',
+              'Unified Ultra Pool',
+              '100%',
+              undefined,
+              'Bundled with Gemini 5h & 7d pools'
+            )
+          );
         }
       } else {
         items.push({
-          label: `  No usage snapshot recorded for "${target.name}"`,
-          description: 'Click Refresh below to pull live usage from Google',
-          detail:
-            'Refreshes directly in the background without interrupting your active session'
+          label: `  $(info) No usage snapshot recorded for "${target.name}"`,
+          description: 'Select Refresh below to pull live usage from Google'
         });
       }
 
       items.push({
-        label: 'Actions',
+        label: 'ACTIONS',
         kind: vscode.QuickPickItemKind.Separator
       });
 
       items.push({
-        label: `$(refresh) Refresh "${target.name}" usage now`,
+        label: `  $(sync) Refresh "${target.name}" usage now`,
         description:
-          'Pulls live Gemini & Claude limits without switching your active session',
+          'Pull live 5h & weekly limits in background without switching',
         action: 'refreshInactive'
       });
 
       items.push({
-        label: `$(arrow-swap) Switch to "${target.name}"`,
+        label: `  $(arrow-swap) Switch to "${target.name}"`,
         description: `Activate ${target.email}`,
         action: 'switch'
       });
 
       const choice = await vscode.window.showQuickPick(items, {
-        placeHolder: `Quota Snapshot · ${target.name} (${target.email}) · Snapped ${timeAgo}`
+        title: `Charlier · ${target.name} (${planLabel} Plan)`,
+        placeHolder: `${target.email}  ·  Updated ${timeAgo}  ·  Select an action or press Esc`
       });
 
       if (choice?.action === 'refreshInactive') {
@@ -835,12 +982,22 @@ export class UIController {
           `$(sync~spin) Refreshing "${target.name}" usage...`,
           2500
         );
-        await this.quotaService.refreshInactiveProfile(target, this.vault, true);
-        await this.update();
-        vscode.window.setStatusBarMessage(
-          `$(check) Updated usage snapshot for "${target.name}".`,
-          3000
+        const updated = await this.quotaService.refreshInactiveProfile(
+          target,
+          this.vault,
+          true
         );
+        await this.update();
+        if (updated) {
+          vscode.window.setStatusBarMessage(
+            `$(check) Updated usage snapshot for "${target.name}".`,
+            3000
+          );
+        } else {
+          vscode.window.showWarningMessage(
+            `Could not refresh "${target.name}" right now. Showing last saved snapshot.`
+          );
+        }
         await this.showQuotaDetails(target.id);
       } else if (choice?.action === 'switch') {
         await this.handleSwitch(target.id);
@@ -856,12 +1013,24 @@ export class UIController {
       return;
     }
 
-    const items: vscode.QuickPickItem[] = [];
+    const activeProf =
+      target ||
+      (live.email
+        ? profiles.find(
+            (p) => p.email.toLowerCase() === live.email!.toLowerCase()
+          ) || null
+        : null);
 
-    items.push({
-      label: `Antigravity Quota Dashboard · ${quota.tier}`,
-      kind: vscode.QuickPickItemKind.Separator
-    });
+    if (activeProf && quota.email && activeProf.email.toLowerCase() === quota.email.toLowerCase()) {
+      const parsed = this.quotaService.parseMetrics(quota, activeProf.planOverride);
+      this.vault.updateProfileCachedQuota(activeProf.id, parsed);
+    }
+
+    const planTier = activeProf?.planOverride || quota.planTier;
+    const activeTitleName = activeProf?.name || (live.email ? live.email.split('@')[0] : 'Active Session');
+    const activeEmail = activeProf?.email || live.email || quota.email || '';
+
+    const items: Array<vscode.QuickPickItem & { action?: string }> = [];
 
     for (const group of quota.groups) {
       const isArgon = group.displayName.toLowerCase().includes('argon');
@@ -869,76 +1038,98 @@ export class UIController {
         group.displayName.toLowerCase().includes('claude') ||
         group.displayName.toLowerCase().includes('gpt');
 
-      if (quota.planTier === 'FREE' && (isArgon || isClaudeGpt)) {
+      if (planTier === 'FREE' && (isArgon || isClaudeGpt)) {
         continue;
       }
 
-      let groupHeader = group.displayName.toUpperCase();
-      if (isArgon) {
-        groupHeader = 'GEMINI 4 ARGON · Pro Weekly Allowance';
-      } else if (isClaudeGpt) {
-        groupHeader = 'CLAUDE & GPT MODELS · Opus, Sonnet, GPT-OSS';
-      } else {
-        groupHeader =
-          quota.planTier === 'ULTRA'
-            ? 'GEMINI MODELS · Argon Included'
-            : 'GEMINI MODELS · Flash & Pro';
-      }
+      const groupHeader = isArgon
+        ? 'GEMINI 4 ARGON'
+        : isClaudeGpt
+          ? 'CLAUDE & GPT'
+          : 'GEMINI';
 
       items.push({
         label: groupHeader,
         kind: vscode.QuickPickItemKind.Separator
       });
 
-      for (const bucket of group.buckets) {
+      const orderedBuckets = [...group.buckets].sort((a, b) =>
+        a.window === '5h' && b.window !== '5h' ? -1 : b.window === '5h' && a.window !== '5h' ? 1 : 0
+      );
+
+      for (const bucket of orderedBuckets) {
         const is5h = bucket.window === '5h';
-        const windowTitle = is5h
-          ? '5-Hour Fast Pool    '
-          : '7-Day Rolling Pool  ';
-        const fraction = bucket.disabled ? 0 : bucket.remainingFraction ?? 0;
-        const pct = Math.round(fraction * 100);
-        const meter = this.quotaService.renderLinenMeter(fraction, 8);
-        const resetStr = this.quotaService.formatResetCompact(bucket.resetTime);
+        const windowTitle = is5h ? '5-Hour Fast Pool' : '7-Day Weekly Pool';
+        const icon = isArgon ? 'flame' : is5h ? 'pulse' : 'calendar';
+        const modelScope = isArgon
+          ? 'Pro weekly allowance'
+          : isClaudeGpt
+            ? 'Opus, Sonnet, GPT-OSS'
+            : 'Flash & Pro';
 
-        let statusPill = '';
         if (bucket.disabled) {
-          statusPill = 'Inactive (weekly reserve applied)';
-        } else if (pct === 0) {
-          statusPill = resetStr
-            ? `Depleted · Resets in ${resetStr}`
-            : 'Depleted';
-        } else if (pct === 100) {
-          statusPill = '100% Full Capacity';
+          const weeklyBucket = group.buckets.find((b) => b.window === 'weekly') || bucket;
+          const wkPct = `${Math.round((weeklyBucket.remainingFraction ?? 1) * 100)}%`;
+          items.push(
+            this.buildPoolRow(
+              icon,
+              windowTitle,
+              wkPct,
+              undefined,
+              modelScope
+            )
+          );
         } else {
-          statusPill = resetStr ? `Active · Resets in ${resetStr}` : 'Active';
+          const pctStr = `${Math.round((bucket.remainingFraction ?? 0) * 100)}%`;
+          items.push(
+            this.buildPoolRow(
+              icon,
+              windowTitle,
+              pctStr,
+              bucket.resetTime,
+              modelScope
+            )
+          );
         }
-
-        let scopeDetail = '';
-        if (isArgon) {
-          scopeDetail =
-            'Dedicated allocation for Gemini 4 Argon reasoning models';
-        } else if (isClaudeGpt) {
-          scopeDetail = is5h
-            ? 'Short-term burst limit for Claude and GPT models'
-            : 'Weekly capacity reserve for Claude Opus, Claude Sonnet, and GPT-OSS';
-        } else {
-          scopeDetail = is5h
-            ? 'Rolling 5-hour demand-smoothing pool for Gemini Flash & Pro'
-            : 'Weekly baseline capacity pool for Gemini Flash & Pro';
-        }
-
-        items.push({
-          label: `  ${windowTitle}  ${meter}  ${pct}%`,
-          description: statusPill,
-          detail: scopeDetail
-        });
       }
     }
 
-    await vscode.window.showQuickPick(items, {
-      placeHolder: `Antigravity Quota · ${quota.tier} · Live from Daemon`,
+    if (planTier === 'ULTRA' && !quota.hasArgonGroup) {
+      items.push({
+        label: 'GEMINI 4 ARGON',
+        kind: vscode.QuickPickItemKind.Separator
+      });
+      items.push(
+        this.buildPoolRow(
+          'sparkle',
+          'Unified Ultra Pool',
+          '100%',
+          undefined,
+          'Bundled with Gemini 5h & 7d pools'
+        )
+      );
+    }
+
+    items.push({
+      label: 'ACTIONS',
+      kind: vscode.QuickPickItemKind.Separator
+    });
+    items.push({
+      label: '  $(sync) Refresh live telemetry',
+      description: 'Query local Antigravity daemon and vault snapshots',
+      action: 'refreshActive'
+    });
+
+    const picked = await vscode.window.showQuickPick(items, {
+      title: `Charlier · ${activeTitleName} (${planTier} Plan · Active)`,
+      placeHolder: `${activeEmail ? `${activeEmail}  ·  ` : ''}Live daemon telemetry  ·  Press Esc to close`,
       canPickMany: false
     });
+
+    if (picked?.action === 'refreshActive') {
+      await this.refreshQuota();
+      await this.showQuotaDetails(activeProf?.id);
+    }
   }
 
   public async refreshQuota(): Promise<void> {

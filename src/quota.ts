@@ -420,6 +420,51 @@ export class QuotaService {
     });
   }
 
+  private getAICodeJson<T>(
+    accessToken: string,
+    endpointPath: string
+  ): Promise<{ status: number; data: T | null }> {
+    return new Promise((resolve) => {
+      const req = https.request(
+        {
+          hostname: 'aicode.googleapis.com',
+          path: endpointPath,
+          method: 'GET',
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Antigravity/1.11.0'
+          },
+          timeout: 5000
+        },
+        (res) => {
+          let raw = '';
+          res.on('data', (c) => (raw += c));
+          res.on('end', () => {
+            const status = res.statusCode || 0;
+            try {
+              resolve({ status, data: JSON.parse(raw) as T });
+            } catch {
+              resolve({ status, data: null });
+            }
+          });
+        }
+      );
+
+      req.on('error', () => resolve({ status: 0, data: null }));
+      req.on('timeout', () => {
+        req.destroy();
+        resolve({ status: 0, data: null });
+      });
+      req.end();
+    });
+  }
+
+  private isResetExpired(isoStr?: string): boolean {
+    if (!isoStr) return false;
+    const resetMs = new Date(isoStr).getTime();
+    return Number.isFinite(resetMs) && resetMs <= Date.now();
+  }
+
   /**
    * Refreshes an inactive profile's OAuth token and live quota directly against Google's
    * Cloud Code APIs in the background without touching active session files or the daemon.
@@ -450,8 +495,9 @@ export class QuotaService {
       // Persist fresh access token inside the inactive profile's vault folder only
       vault.updateInactiveProfileToken(profile.id, tokenRes.access_token, tokenRes.expires_in);
 
-      const [loadRes, modelsRes, quotaRes] = await Promise.all([
+      const [loadRes, licensesRes, modelsRes, quotaRes] = await Promise.all([
         this.postCloudCodeJson<any>(tokenRes.access_token, '/v1internal:loadCodeAssist', {}),
+        this.getAICodeJson<any>(tokenRes.access_token, '/v1alpha:fetchLicenses'),
         this.postCloudCodeJson<any>(tokenRes.access_token, '/v1internal:fetchAvailableModels', {}),
         this.postCloudCodeJson<any>(
           tokenRes.access_token,
@@ -460,7 +506,16 @@ export class QuotaService {
         )
       ]);
 
-      const paidTier = loadRes.data?.paidTier || loadRes.data?.currentTier;
+      const licenseEntry = Array.isArray(licensesRes.data?.licenses)
+        ? licensesRes.data.licenses[0]
+        : null;
+      const paidTier =
+        loadRes.data?.paidTier ||
+        loadRes.data?.currentTier ||
+        (licenseEntry?.userTier
+          ? { id: String(licenseEntry.userTier), name: String(licenseEntry.tierDisplayName || '') }
+          : undefined);
+
       const planTier = this.resolvePlanTier(
         paidTier,
         undefined,
@@ -468,13 +523,15 @@ export class QuotaService {
         profile.planOverride
       );
 
-      // 1. Extract Gemini pool quota from fetchAvailableModels
-      let gemini = profile.cachedQuota?.gemini || '--';
-      let geminiReset = profile.cachedQuota?.geminiReset;
+      // 1. Extract Gemini 5h pool from fetchAvailableModels & preserve/auto-heal 7d pool
+      let gemini5h = profile.cachedQuota?.gemini5h || profile.cachedQuota?.gemini || '--';
+      let gemini5hReset = profile.cachedQuota?.gemini5hReset || profile.cachedQuota?.geminiReset;
+
       const modelsDict = modelsRes.data?.models;
       if (modelsDict && typeof modelsDict === 'object') {
         const preferredKeys = [
           'gemini-3.8-flash-tiered',
+          'gemini-3.8-flash',
           'gemini-3-flash',
           'gemini-2.5-pro',
           'gemini-2.5-flash'
@@ -498,43 +555,105 @@ export class QuotaService {
           const pct = Math.round(
             Math.max(0, Math.min(1, foundQuota.remainingFraction)) * 100
           );
-          gemini = `${pct}%`;
+          gemini5h = `${pct}%`;
           if (foundQuota.resetTime) {
-            geminiReset = String(foundQuota.resetTime);
+            gemini5hReset = String(foundQuota.resetTime);
+          } else {
+            gemini5hReset = undefined;
           }
         }
       }
 
-      // 2. Extract Claude & GPT 3P pool quota from retrieveUserQuotaSummary
-      let claudeGpt = profile.cachedQuota?.claudeGpt || '--';
-      let claudeReset = profile.cachedQuota?.claudeReset;
-      if (quotaRes.status === 403 || planTier === 'FREE') {
-        claudeGpt = planTier === 'FREE' ? '--' : claudeGpt;
+      let gemini7d = profile.cachedQuota?.gemini7d || gemini5h;
+      let gemini7dReset = profile.cachedQuota?.gemini7dReset;
+      if (this.isResetExpired(gemini7dReset)) {
+        gemini7d = '100%';
+        gemini7dReset = undefined;
+      }
+
+      // Summary Gemini metric uses the tighter of 5h vs 7d
+      const p5h = parseInt(gemini5h, 10);
+      const p7d = parseInt(gemini7d, 10);
+      let gemini = gemini5h;
+      let geminiReset = gemini5hReset || gemini7dReset;
+      if (Number.isFinite(p5h) && Number.isFinite(p7d)) {
+        if (p7d < p5h) {
+          gemini = `${p7d}%`;
+          geminiReset = gemini7dReset || gemini5hReset;
+        } else if (p5h < p7d) {
+          gemini = `${p5h}%`;
+          geminiReset = gemini5hReset || gemini7dReset;
+        } else {
+          gemini = `${p5h}%`;
+          geminiReset = gemini7dReset || gemini5hReset;
+        }
+      }
+
+      // 2. Extract Claude & GPT 5h + 7d pools from retrieveUserQuotaSummary
+      let claude5h = profile.cachedQuota?.claude5h || '--';
+      let claude5hReset = profile.cachedQuota?.claude5hReset;
+      let claude7d = profile.cachedQuota?.claude7d || profile.cachedQuota?.claudeGpt || '--';
+      let claude7dReset = profile.cachedQuota?.claude7dReset || profile.cachedQuota?.claudeReset;
+      let claudeGpt = claude7d;
+      let claudeReset = claude7dReset;
+
+      if (planTier === 'FREE') {
+        claude5h = '--';
+        claude5hReset = undefined;
+        claude7d = '--';
+        claude7dReset = undefined;
+        claudeGpt = '--';
+        claudeReset = undefined;
       } else if (quotaRes.status === 200 && Array.isArray(quotaRes.data?.groups)) {
         for (const g of quotaRes.data.groups) {
           const gName = String(g.displayName || '').toLowerCase();
           if (gName.includes('claude') || gName.includes('gpt')) {
-            const b =
-              (g.buckets || []).find((x: any) => x.window === 'weekly') ||
-              (g.buckets || [])[0];
-            if (b) {
-              const frac = typeof b.remainingFraction === 'number' ? b.remainingFraction : 0;
-              claudeGpt = `${Math.round(Math.max(0, Math.min(1, frac)) * 100)}%`;
-              if (b.resetTime) {
-                claudeReset = String(b.resetTime);
+            const buckets: any[] = g.buckets || [];
+            const bWk = buckets.find((x: any) => x.window === 'weekly') || buckets[0];
+            const b5h = buckets.find((x: any) => x.window === '5h');
+
+            if (bWk) {
+              const fracWk =
+                typeof bWk.remainingFraction === 'number' ? bWk.remainingFraction : 0;
+              claude7d = `${Math.round(Math.max(0, Math.min(1, fracWk)) * 100)}%`;
+              claude7dReset = bWk.resetTime ? String(bWk.resetTime) : undefined;
+              claudeGpt = claude7d;
+              claudeReset = claude7dReset;
+            }
+
+            if (b5h) {
+              if (b5h.disabled) {
+                claude5h = claude7d !== '--' ? claude7d : '100%';
+                claude5hReset = undefined;
+              } else {
+                const frac5h =
+                  typeof b5h.remainingFraction === 'number' ? b5h.remainingFraction : 0;
+                claude5h = `${Math.round(Math.max(0, Math.min(1, frac5h)) * 100)}%`;
+                claude5hReset = b5h.resetTime ? String(b5h.resetTime) : undefined;
               }
+            } else if (claude7d !== '--') {
+              claude5h = claude7d;
             }
           }
         }
       }
 
-      // 3. Resolve Argon representation
+      // 3. Resolve Argon representation & auto-heal expired weekly reset
       let argon = '--';
+      let argonReset = profile.cachedQuota?.argonReset;
       if (planTier === 'ULTRA') {
         argon = 'incl.';
+        argonReset = undefined;
       } else if (planTier === 'PRO') {
-        const prevArgon = profile.cachedQuota?.argon;
-        argon = prevArgon && prevArgon !== 'incl.' ? prevArgon : '--';
+        if (this.isResetExpired(argonReset)) {
+          argon = '100%';
+          argonReset = undefined;
+        } else {
+          const prevArgon = profile.cachedQuota?.argon;
+          argon = prevArgon && prevArgon !== 'incl.' ? prevArgon : '--';
+        }
+      } else {
+        argonReset = undefined;
       }
 
       const metric: CachedQuotaMetric = {
@@ -542,11 +661,17 @@ export class QuotaService {
         gemini,
         claudeGpt,
         argon,
+        ...(gemini5h && gemini5h !== '--' ? { gemini5h } : {}),
+        ...(gemini5hReset ? { gemini5hReset } : {}),
+        ...(gemini7d && gemini7d !== '--' ? { gemini7d } : {}),
+        ...(gemini7dReset ? { gemini7dReset } : {}),
+        ...(claude5h && claude5h !== '--' ? { claude5h } : {}),
+        ...(claude5hReset ? { claude5hReset } : {}),
+        ...(claude7d && claude7d !== '--' ? { claude7d } : {}),
+        ...(claude7dReset ? { claude7dReset } : {}),
         ...(geminiReset ? { geminiReset } : {}),
         ...(claudeReset ? { claudeReset } : {}),
-        ...(profile.cachedQuota?.argonReset
-          ? { argonReset: profile.cachedQuota.argonReset }
-          : {}),
+        ...(argonReset ? { argonReset } : {}),
         updatedAt: Date.now()
       };
 
@@ -638,6 +763,14 @@ export class QuotaService {
     let gemini = '--';
     let claudeGpt = '--';
     let argon = plan === 'ULTRA' ? 'incl.' : '--';
+    let gemini5h: string | undefined;
+    let gemini5hReset: string | undefined;
+    let gemini7d: string | undefined;
+    let gemini7dReset: string | undefined;
+    let claude5h: string | undefined;
+    let claude5hReset: string | undefined;
+    let claude7d: string | undefined;
+    let claude7dReset: string | undefined;
     let geminiReset: string | undefined;
     let claudeReset: string | undefined;
     let argonReset: string | undefined;
@@ -653,13 +786,29 @@ export class QuotaService {
           if (b.resetTime) argonReset = b.resetTime;
         }
       } else if (name.includes('claude') || name.includes('gpt')) {
+        const b5h = group.buckets.find((b) => b.window === '5h');
         const weekly =
           group.buckets.find((b) => b.window === 'weekly') || group.buckets[0];
         if (weekly) {
           const frac = weekly.remainingFraction ?? 0;
           const pct = Math.round(frac * 100);
-          claudeGpt = `${pct}%`;
-          if (weekly.resetTime) claudeReset = weekly.resetTime;
+          claude7d = `${pct}%`;
+          claudeGpt = claude7d;
+          if (weekly.resetTime) {
+            claude7dReset = weekly.resetTime;
+            claudeReset = weekly.resetTime;
+          }
+        }
+        if (b5h) {
+          if (b5h.disabled) {
+            claude5h = claude7d || '100%';
+          } else {
+            const frac5h = b5h.remainingFraction ?? 0;
+            claude5h = `${Math.round(frac5h * 100)}%`;
+            if (b5h.resetTime) claude5hReset = b5h.resetTime;
+          }
+        } else if (claude7d) {
+          claude5h = claude7d;
         }
       } else if (name.includes('gemini')) {
         const b5h = group.buckets.find((b) => b.window === '5h');
@@ -667,10 +816,24 @@ export class QuotaService {
           group.buckets.find((b) => b.window === 'weekly') || group.buckets[0];
         const f5h = b5h?.remainingFraction ?? 1;
         const fWk = bWeekly?.remainingFraction ?? 1;
+
+        if (b5h) {
+          gemini5h = `${Math.round(f5h * 100)}%`;
+          if (b5h.resetTime) gemini5hReset = b5h.resetTime;
+        }
+        if (bWeekly) {
+          gemini7d = `${Math.round(fWk * 100)}%`;
+          if (bWeekly.resetTime) gemini7dReset = bWeekly.resetTime;
+        }
+
         const minFrac = Math.min(f5h, fWk);
         const pct = Math.round(minFrac * 100);
         gemini = `${pct}%`;
-        geminiReset = b5h?.resetTime || bWeekly?.resetTime;
+        if (f5h < fWk) {
+          geminiReset = b5h?.resetTime || bWeekly?.resetTime;
+        } else {
+          geminiReset = bWeekly?.resetTime || b5h?.resetTime;
+        }
       }
     }
 
@@ -679,6 +842,14 @@ export class QuotaService {
       gemini,
       claudeGpt,
       argon,
+      ...(gemini5h ? { gemini5h } : {}),
+      ...(gemini5hReset ? { gemini5hReset } : {}),
+      ...(gemini7d ? { gemini7d } : {}),
+      ...(gemini7dReset ? { gemini7dReset } : {}),
+      ...(claude5h ? { claude5h } : {}),
+      ...(claude5hReset ? { claude5hReset } : {}),
+      ...(claude7d ? { claude7d } : {}),
+      ...(claude7dReset ? { claude7dReset } : {}),
       ...(geminiReset ? { geminiReset } : {}),
       ...(claudeReset ? { claudeReset } : {}),
       ...(argonReset ? { argonReset } : {}),
@@ -998,8 +1169,15 @@ export class QuotaService {
         const sPlan = p.planOverride || this.sanitizeMetric(rawMetrics.plan);
         const sGemini = this.sanitizeMetric(rawMetrics.gemini);
         const sClaude = this.sanitizeMetric(rawMetrics.claudeGpt);
+        const rawArgon = this.sanitizeMetric(rawMetrics.argon);
         const sArgon =
-          sPlan === 'FREE' ? '--' : this.sanitizeMetric(rawMetrics.argon);
+          sPlan === 'FREE'
+            ? '--'
+            : sPlan === 'ULTRA'
+              ? 'incl.'
+              : rawArgon !== '--'
+                ? rawArgon
+                : 'Pro';
         const snapText = isActive
           ? '*live*'
           : rawMetrics.updatedAt

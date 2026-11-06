@@ -5,6 +5,14 @@ export interface CachedQuotaMetric {
   gemini: string;
   claudeGpt: string;
   argon: string;
+  gemini5h?: string;
+  gemini5hReset?: string;
+  gemini7d?: string;
+  gemini7dReset?: string;
+  claude5h?: string;
+  claude5hReset?: string;
+  claude7d?: string;
+  claude7dReset?: string;
   geminiReset?: string;
   claudeReset?: string;
   argonReset?: string;
