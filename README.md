@@ -4,6 +4,8 @@
 
 **Fast multi-account switcher, local credential vault, and live quota dashboard for Google Antigravity.**
 
+[![VS Code Marketplace](https://img.shields.io/badge/VS_Code_Marketplace-v0.1.0-2ea44f?style=flat-square&labelColor=18181b&logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0id2hpdGUiPjxwYXRoIGQ9Ik0yMy4xNSAyLjU4N0wxOC4yMS4yMWExLjQ5NCAxLjQ5NCAwIDAgMC0xLjcwNS4yOWwtOS40NiA4LjYzLTQuMTItMy4xMjhhLjk5OS45OTkgMCAwIDAtMS4yNzYuMDU3TC4zMjcgNy4yNjFBMSAxIDAgMCAwIC4zMjYgOC43NEwzLjg5OSAxMiAuMzI2IDE1LjI2YTEgMSAwIDAgMCAuMDAxIDEuNDc5TDEuNjUgMTcuOTRhLjk5OS45OTkgMCAwIDAgMS4yNzYuMDU3bDQuMTItMy4xMjggOS40NiA4LjYzYTEuNDkyIDEuNDkyIDAgMCAwIDEuNzA0LjI5bDQuOTQyLTIuMzc3QTEuNSAxLjUgMCAwIDAgMjQgMTkuODhWNC4xMmExLjUgMS41IDAgMCAwLS44NS0xLjUzM3ptLTUuMTQ2IDE0Ljg2MUwxMC44MjYgMTJsNy4xNzgtNS40NDh2MTAuODk2eiIvPjwvc3ZnPg==)](https://marketplace.visualstudio.com/items?itemName=Sernine.charlier)
+[![Open VSX](https://img.shields.io/badge/Open_VSX-v0.1.0-2ea44f?style=flat-square&labelColor=18181b&logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0id2hpdGUiPjxwYXRoIGQ9Ik0xMiAxTDIgNi41djExTDEyIDIzbDEwLTUuNXYtMTFMMTIgMXptMCAyLjMxbDcuNSA0LjEyTDEyIDExLjU1IDQuNSA3LjQzIDEyIDMuMzF6TTQgOS40NGw3IDMuODV2Ny40bC03LTMuODV2LTcuNHptOSAxMS4yNXYtNy40bDctMy44NXY3LjRsLTcgMy44NXoiLz48L3N2Zz4=)](https://open-vsx.org/extension/Sernine/charlier)
 ![Windows](https://img.shields.io/badge/Windows-Verified-2ea44f?style=flat-square&labelColor=18181b&logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0id2hpdGUiPjxwYXRoIGQ9Ik0wIDBoMTEuMzc3djExLjM3Mkgwem0xMi42MjMgMEgyNHYxMS4zNzJIMTIuNjIzek0wIDEyLjYyM2gxMS4zNzdWMjRIMHptMTIuNjIzIDBIMjRWMjRIMTIuNjIzeiIvPjwvc3ZnPg==)
 ![macOS](https://img.shields.io/badge/macOS-Supported-2ea44f?style=flat-square&labelColor=18181b&logo=apple&logoColor=white)
 ![Linux](https://img.shields.io/badge/Linux-Supported-2ea44f?style=flat-square&labelColor=18181b&logo=linux&logoColor=white)
@@ -58,6 +60,11 @@ Charlier ships **zero runtime dependencies** and **zero unsigned binaries**:
 ---
 
 ## Quick Start
+
+### Install
+* **Antigravity / Open VSX**: Search **`Sernine.charlier`** in the Extensions sidebar, or grab it from **[Open VSX](https://open-vsx.org/extension/Sernine/charlier)**.
+* **VS Code Marketplace**: Install directly from **[Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=Sernine.charlier)** (`ext install Sernine.charlier`).
+* **Manual `.vsix`**: Download the latest `.vsix` from **[GitHub Releases](https://github.com/prince-sernine/charlier/releases)** and run `Extensions: Install from VSIX...`.
 
 ### 1. Save Your Current Account
 1. Open VS Code with your Antigravity account signed in.
