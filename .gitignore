@@ -10,3 +10,7 @@ yarn-debug.log*
 yarn-error.log*
 .vscode-test/
 
+
+# Local graph cache (regenerable, not committed).
+/graft/
+src-native/*/target/

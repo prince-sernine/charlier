@@ -1,144 +1,245 @@
-<img src="./media/icon.png" alt="Charlier card-cut icon" width="88" height="88">
+<div align="center">
+
+<br/>
+
+<img src="media/icon.png" alt="Charlier Logo" width="128" height="128" />
 
 # Charlier
 
-**Fast multi-account switcher, local credential vault, and live quota dashboard for Google Antigravity.**
+**Multi-Account Vault, Surgical Hot-Swap & Live Quota Cockpit for Google Antigravity and OpenAI Codex**
 
-[![VS Code Marketplace](https://img.shields.io/badge/VS_Code_Marketplace-v0.1.0-2ea44f?style=flat-square&labelColor=18181b&logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0id2hpdGUiPjxwYXRoIGQ9Ik0yMy4xNSAyLjU4N0wxOC4yMS4yMWExLjQ5NCAxLjQ5NCAwIDAgMC0xLjcwNS4yOWwtOS40NiA4LjYzLTQuMTItMy4xMjhhLjk5OS45OTkgMCAwIDAtMS4yNzYuMDU3TC4zMjcgNy4yNjFBMSAxIDAgMCAwIC4zMjYgOC43NEwzLjg5OSAxMiAuMzI2IDE1LjI2YTEgMSAwIDAgMCAuMDAxIDEuNDc5TDEuNjUgMTcuOTRhLjk5OS45OTkgMCAwIDAgMS4yNzYuMDU3bDQuMTItMy4xMjggOS40NiA4LjYzYTEuNDkyIDEuNDkyIDAgMCAwIDEuNzA0LjI5bDQuOTQyLTIuMzc3QTEuNSAxLjUgMCAwIDAgMjQgMTkuODhWNC4xMmExLjUgMS41IDAgMCAwLS44NS0xLjUzM3ptLTUuMTQ2IDE0Ljg2MUwxMC44MjYgMTJsNy4xNzgtNS40NDh2MTAuODk2eiIvPjwvc3ZnPg==)](https://marketplace.visualstudio.com/items?itemName=Sernine.charlier)
-[![Open VSX](https://img.shields.io/badge/Open_VSX-v0.1.0-2ea44f?style=flat-square&labelColor=18181b&logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0id2hpdGUiPjxwYXRoIGQ9Ik0xMiAxTDIgNi41djExTDEyIDIzbDEwLTUuNXYtMTFMMTIgMXptMCAyLjMxbDcuNSA0LjEyTDEyIDExLjU1IDQuNSA3LjQzIDEyIDMuMzF6TTQgOS40NGw3IDMuODV2Ny40bC03LTMuODV2LTcuNHptOSAxMS4yNXYtNy40bDctMy44NXY3LjRsLTcgMy44NXoiLz48L3N2Zz4=)](https://open-vsx.org/extension/Sernine/charlier)
-![Windows](https://img.shields.io/badge/Windows-Verified-2ea44f?style=flat-square&labelColor=18181b&logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0id2hpdGUiPjxwYXRoIGQ9Ik0wIDBoMTEuMzc3djExLjM3Mkgwem0xMi42MjMgMEgyNHYxMS4zNzJIMTIuNjIzek0wIDEyLjYyM2gxMS4zNzdWMjRIMHptMTIuNjIzIDBIMjRWMjRIMTIuNjIzeiIvPjwvc3ZnPg==)
-![macOS](https://img.shields.io/badge/macOS-Supported-2ea44f?style=flat-square&labelColor=18181b&logo=apple&logoColor=white)
-![Linux](https://img.shields.io/badge/Linux-Supported-2ea44f?style=flat-square&labelColor=18181b&logo=linux&logoColor=white)
-![Zero Dependencies](https://img.shields.io/badge/Dependencies-0-2ea44f?style=flat-square&labelColor=18181b)
-![License](https://img.shields.io/badge/License-Source_Available-2ea44f?style=flat-square&labelColor=18181b)
+<p>
+  <a href="#cross-os-architecture"><img src="https://img.shields.io/badge/Windows-DPAPI%20%2B%20WinCred%20N--API-0F2028?style=flat-square&logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0iIzg2RjY1QyI%2bPHBhdGggZD0iTTAgMGgxMS4zNzd2MTEuMzcySDB6bTEyLjYyMyAwSDI0djExLjM3MkgxMi42MjN6TTAgMTIuNjIzaDExLjM3N1YyNEgwem0xMi42MjMgMEgyNFYyNEgxMi42MjN6Ii8%2bPC9zdmc%2b" alt="Windows" height="26" /></a>
+  <a href="#cross-os-architecture"><img src="https://img.shields.io/badge/macOS-Keychain%20CLI-0F2028?style=flat-square&logo=apple&logoColor=86F65C" alt="macOS" height="26" /></a>
+  <a href="#cross-os-architecture"><img src="https://img.shields.io/badge/Linux-Secret%20Service%20%2F%20D--Bus-0F2028?style=flat-square&logo=linux&logoColor=86F65C" alt="Linux" height="26" /></a>
+</p>
+<p><sub>&middot;&nbsp;&nbsp;&nbsp;&middot;&nbsp;&nbsp;&nbsp;&middot;</sub></p>
+<p>
+  <img src="https://img.shields.io/badge/Charlier-v0.2.0-0B1119?style=flat-square&labelColor=131C26&color=86F65C" alt="Version 0.2.0" height="22" />
+  <img src="https://img.shields.io/badge/Runtime%20Deps-0%20npm%20packages-0B1119?style=flat-square&labelColor=131C26&color=19B995" alt="Zero Dependencies" height="22" />
+  <a href="https://marketplace.visualstudio.com/items?itemName=Sernine.charlier"><img src="https://img.shields.io/badge/VS%20Code-Marketplace-0B1119?style=flat-square&labelColor=131C26&color=8DBCF6&logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0iIzhEQkNGNiI%2bPHBhdGggZD0iTTIzLjE1IDIuNTg3TDE4LjIxLjIxYTEuNDk0IDEuNDk0IDAgMCAwLTEuNzA1LjI5bC05LjQ2IDguNjMtNC4xMi0zLjEyOGEuOTk5Ljk5OSAwIDAgMC0xLjI3Ni4wNTdMLjMyNyA3LjI2MUExIDEgMCAwIDAgLjMyNiA4Ljc0TDMuODk5IDEyIC4zMjYgMTUuMjZhMSAxIDAgMCAwIC4wMDEgMS40NzlMMS42NSAxNy45NGEuOTk5Ljk5OSAwIDAgMCAxLjI3Ni4wNTdsNC4xMi0zLjEyOCA5LjQ2IDguNjNhMS40OTIgMS40OTIgMCAwIDAgMS43MDQuMjlsNC45NDItMi4zNzdBMS41IDEuNSAwIDAgMCAyNCAxOS44OFY0LjEyYTEuNSAxLjUgMCAwIDAtLjg1LTEuNTMzem0tNS4xNDYgMTQuODYxTDEwLjgyNiAxMmw3LjE3OC01LjQ0OHYxMC44OTZ6Ii8%2bPC9zdmc%2b" alt="VS Code Marketplace" height="22" /></a>
+  <a href="https://open-vsx.org/extension/Sernine/charlier"><img src="https://img.shields.io/badge/Open%20VSX-Registry-0B1119?style=flat-square&labelColor=131C26&color=92D6BE&logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0iIzkyRDZCRSI%2bPHBhdGggZD0iTTEyIDFMMiA2LjV2MTFMMTIgMjNsMTAtNS41di0xMUwxMiAxem0wIDIuMzFsNy41IDQuMTJMMTIgMTEuNTUgNC41IDcuNDMgMTIgMy4zMXpNNCA5LjQ0bDcgMy44NXY3LjRsLTctMy44NXYtNy40em05IDExLjI1di03LjRsNy0zLjg1djcuNGwtNyAzLjg1eiIvPjwvc3ZnPg==" alt="Open VSX" height="22" /></a>
+</p>
+
+</div>
+
+<p align="center">
+  <img src="art/screenshots/cockpit-antigravity.png" alt="Charlier Google Antigravity Cockpit and Hover Overlay" width="49%" />
+  <img src="art/screenshots/cockpit-codex.png" alt="Charlier OpenAI Codex Cockpit and Hover Overlay" width="49%" />
+</p>
 
 ---
 
 ## Why This Exists
 
-Most multi-account tools for Antigravity either choke the extension host or drop the ball entirely: bloated WebAssembly SQLite runtimes just to parse two JSON keys, background polling loops that stutter the editor, or kicking you out to a browser OAuth screen on every switch.
+Every existing account switcher for AI coding extensions breaks the moment you actually ship work in an IDE:
 
-When you rotate across Free, Pro, and Ultra accounts and hit a 5-hour or weekly quota wall mid-session, you shouldn't have to sign out, open a browser, wait on OAuth callbacks, and re-authenticate just to keep working.
+- **Most switchers are slow, brittle, or half-wired**: They dump WebAssembly SQLite runtimes just to poke two keys, poll background loops until the editor stutters, or overwrite disk JSON blindly while leaving your OS keyring and running agent stuck on the previous login.
+- **Full-window reloads wreck your flow**: Reloading the Extension Host or editor window just to rotate accounts kills every language server, debugger, terminal task, and co-running assistant in the workspace.
+- **Charlier swaps only the provider you touched**: Whether you run both extensions inside **VS Code** or install **OpenAI Codex inside Antigravity IDE**, Charlier hot-swaps in place (`~100ms` in-memory `codex app-server` stdio graft with a 3-stage `account/updated` router reset on Codex; `~800ms` window-scoped language-server daemon respawn on Antigravity, with a `2`-in-`10m` surgical budget guard that escalates to a clean soft Extension Host restart before tripping upstream's 3-restart `process_exit_nonzero` limit) while sibling providers stay untouched. Cross-window file watchers propagate switches across every open editor window automatically.
+- **One IDE session + as many parallel terminal profiles as you want**: Keep Account A pinned in the IDE while spawning Profiles B, C, and D in dedicated terminal tabs via [Multi-Window & CLI Concurrency (`CLI Only` Mode)](#multi-window--cli-concurrency-cli-only-mode). One click launches `codex --no-daemon` or `agy` inside an isolated per-profile home (`~/.gemini/charlier/cli-homes/`) with zero collision against your IDE login.
 
-With **Charlier**, you sign into each account once, lock it into your local vault, and swap between them in milliseconds without re-logging in.
-
-Named after the **Charlier pass**: the classic one-handed card cut that shifts the bottom half of the deck to the top in a single clean motion. Pull your next account to the top of the stack in one click and keep moving. Built under **Sernine**.
-
----
-
-## What It Does
-
-* **Hot-Swap Without Re-Logging In**: Swaps `~/.gemini/google_accounts.json`, `~/.gemini/oauth_creds.json`, and your OS keyring token in one non-blocking pass, then soft-restarts the extension host (`agy`) so your new session goes live in ~150ms without closing your open tabs, terminals, or editor windows.
-* **1-Click Switching Right from Hover**: Hover over the status bar pill to view your accounts and click any inactive profile name directly in the hover table to switch immediately. Smart windowing keeps the hover table compact (showing your active session + top recent rotation targets, with a `+ N more in vault` overflow link if you run a large roster).
-* **Live Quota Gauges**: Pixel-aligned linen-weave capacity meters (`▓▓▓▓░`) show remaining capacity and exact reset timers across every model pool:
-  * **Gemini** *(Flash, Pro)*: 5-hour fast pool and 7-day rolling reserve.
-  * **Claude & GPT** *(Opus, Sonnet, GPT-OSS)*: Weekly reserve and reset window.
-  * **Gemini 4 Argon**: Dedicated Pro allowance and Ultra pool tracking.
-* **Background Refresh for Inactive Accounts**: Mints fresh OAuth access tokens and pulls live quota numbers for your dormant vault accounts directly over HTTPS in the background. You can check which backup account is recharged (`live` or `Xm ago`) without switching into it or interrupting a running agent task.
-* **Accurate Plan Badges**: Reads Google's upstream billing tier (`free-tier`, `g1-pro-tier`, `g1-ultra-tier`) directly instead of trusting default consumer flags, with strict cross-profile email isolation so quota data never bleeds across switches.
-* **Unsaved Session Guard & Focus Auto-Detect**: When you finish signing into a new Google account in your browser and focus VS Code, Charlier detects the new session automatically, flags it in the status bar (`· Unsaved`), and pins a 1-click save card at the top of the menu. Clicking **Add new account** also backs up your current session automatically before clearing the login slot.
-* **Inline QuickPick Controls**: Every profile row in the QuickPick menu includes inline action buttons to inspect its full 5-hour / 7-day quota breakdown or rename it on the spot.
+Named after the **Charlier pass**: the classic one-handed card cut that brings the bottom half of the deck cleanly to the top. Built under **Sernine**.
 
 ---
 
-## Under the Hood (Clean OS Keyrings, Zero EDR False Positives)
+## How Charlier Compares
 
-Extensions that touch system credential stores usually bundle native C++ `node-gyp` binaries or drop unsigned `.exe` helpers into your extension folder. On Windows, that lights up Defender and corporate EDR alerts immediately.
+| Capability | Charlier | Typical Account Switchers | Manual Sign-Out / Sign-In |
+| :--- | :--- | :--- | :--- |
+| **Single-Provider Surgical Reload** | **Yes** - swaps only the provider you clicked (with a 2-per-10m Antigravity crash-guard); sibling AI extensions stay live | **No** - restarts the entire VS Code Extension Host and drops running agents | Full browser OAuth roundtrip |
+| **Switch Latency** | **`~100ms` (Codex) / `~800ms` (Antigravity)** | `3s-8s` full Extension Host or window reload | `30s-60s` browser login + callback |
+| **Parallel CLI + IDE (`CLI Only`)** | **Yes** - runs `codex --no-daemon` and `agy` in isolated per-profile homes while IDE stays pinned | **No** - clobbers the IDE account or collides in global stores | Manual env juggling |
+| **Standby Vault Telemetry** | **Yes** - direct HTTPS background pulls + clock reset healing (frozen on `RE-AUTH`) | **No** - only inspects the currently logged-in account | **No** |
+| **Revocation-Safe Swaps & Auto-Save** | **Yes** - never fires server-side `account/logout`; auto-saves unsaved IDE sessions before switch | **No** - often invalidates sibling sessions or overwrites active tokens | **No** |
+| **Multi-Provider in One Vault** | **Google Antigravity + OpenAI Codex** *(Claude & Kimi co-run aware, full vaults on roadmap)* | Single provider only | Separate logins everywhere |
+| **Runtime Footprint & Win32 Security** | **0 npm deps**, no PowerShell spawns, no unsigned `.exe` droppers (**15 KB `#![no_std]` Rust N-API**) | Heavy SQLite WASM bundles, inline PowerShell scripts, or unsigned helpers | N/A |
 
-Charlier ships **zero runtime dependencies** and **zero unsigned binaries**:
+---
 
-* **OS-Signed Keyring Execution**: Invokes system-signed utilities asynchronously (`execFile`) against the exact credential slots `agy` reads, Base64-encoding Windows secrets in Node before passing them to PowerShell so complex OAuth JSON payloads never hit shell-quoting bugs.
-* **Hand-Rolled gRPC-Web & PID Liveness Probing**: Queries your active local `agy` daemon using zero-dependency binary gRPC-Web framing after verifying process PID liveness (`process.kill(pid, 0)`), filtering out stale crash files so hover checks never hang on dead ports.
-* **Staged Atomic Swaps & Self-Healing `0.05ms` Cache**: Writes credential files via staged `.tmp` renames with lock fallback (zero chance of 0-byte corrupted token files) and self-heals local session metadata on disk so routine status checks resolve in `~0.05ms` without spawning background processes.
+## What It Ships
 
-| Platform | Keyring Store | Native Interface |
-| :--- | :--- | :--- |
-| ![Windows](https://img.shields.io/badge/Windows-18181b?style=flat-square&logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0id2hpdGUiPjxwYXRoIGQ9Ik0wIDBoMTEuMzc3djExLjM3Mkgwem0xMi42MjMgMEgyNHYxMS4zNzJIMTIuNjIzek0wIDEyLjYyM2gxMS4zNzdWMjRIMHptMTIuNjIzIDBIMjRWMjRIMTIuNjIzeiIvPjwvc3ZnPg==) | Windows Credential Manager (`LegacyGeneric:target=gemini:antigravity`) | In-memory `advapi32.dll` (`CredReadW` / `CredWriteW`) & `cmdkey.exe` via signed Windows PowerShell |
-| ![macOS](https://img.shields.io/badge/macOS-18181b?style=flat-square&logo=apple&logoColor=white) | macOS Login Keychain (`service: gemini`, `account: antigravity`) | System `/usr/bin/security` (`find-generic-password` / `add-generic-password`) |
-| ![Linux](https://img.shields.io/badge/Linux-18181b?style=flat-square&logo=linux&logoColor=white) | FreeDesktop Secret Service (`org.freedesktop.secrets`) | `secret-tool` (`libsecret`) matching `zalando/go-keyring` dual `username` / `account` attributes |
+### 1. Night Cut Cockpit & Unified Status Bar Overlay
+- **Single-Surface Colored Status Bar Pill**: One unified status bar pill (`priority: 501`) with a single click target (`QuickPick`, including one-click `workbench.hover.delay` tuning) and an instant hover matrix. Uses Charlier's theme-adaptive <picture><source media="(prefers-color-scheme: light)" srcset="media/providers/antigravity-inline-forest-64.png" /><img src="media/providers/antigravity-inline-mint-64.png" alt="Antigravity" width="15" height="15" align="absmiddle" /></picture> **Antigravity** (mint `#92D6BE`) and scalloped <picture><source media="(prefers-color-scheme: light)" srcset="media/codex/codex-small-cobalt-64.png" /><img src="media/codex/codex-small-ice-64.png" alt="Codex" width="15" height="15" align="absmiddle" /></picture> **Codex** (ice-blue `#8DBCF6`) provider marks, keeping `>_` dedicated cleanly to active CLI terminals, and shifts tone by health (amber `#E8BA6F` warning at `15-49%` or `VERIFY NEEDED`, crimson `#E88585` critical at `1-14%`, error background at `0%` depletion or `RE-AUTH`, plus a trailing `>_` badge with active count whenever background `CLI Only` terminals are running).
+- **Tier-Aware Antigravity Color Health**: Codex tints by the tighter of its global `5h` and `7d` pools. Antigravity computes a tier-aware average across active pools (`FREE`: Gemini; `ULTRA`: Gemini + Claude/GPT + standalone Carbon if provisioned; `PRO`: Gemini + Claude/GPT + Argon + standalone Carbon when Google turns it on) so one low Pro Argon reserve does not paint your entire pill red while Gemini and Claude are healthy.
+- **Lower-Panel Hover Matrix & Gemini 4 Carbon Readiness**: Hovering the Status Bar pill opens a multi-account comparison table (`Profile | Plan | Gemini | [Claude] | Argon | Carbon | Snap` on Antigravity; `Profile | Plan | 5h Pool | 7d Pool | Review | Snap` on Codex) with 1-click row switching. Antigravity's `Carbon` column already ships ready for Gemini 4 Carbon: `ULTRA` shows `incl.` (bundled with Argon inside the Ultra pool), `PRO` displays `--` while standby, and both the Cockpit and Hover Matrix pick up live Pro Carbon buckets automatically whenever Google enables them.
+- **CLI Claimed Visibility & Priority Sorting**: Profiles running in an isolated terminal via `CLI Only` surface across every view: a compact `>_` indicator (plus terminal count when multiple are open) on the Status Bar pill, a terminal marker and amber `CLI` pill in the Hover Matrix row, and `CLI CLAIMED` + `>_ Focus CLI` in the Cockpit. To stop active terminal sessions from getting buried behind idle high-tier standby accounts, Charlier overrides strict tier sort to pin the **Active** account first and float all **`CLI CLAIMED`** profiles right below it inside the Hover Matrix's 4-row cap (overflowing extra standby profiles cleanly to `+ N more in Cockpit`). Clicking a claimed row lets you focus its running terminal instead of spawning colliding duplicates.
+- **Best Standby Smart Failover (`NEXT UP`)**: When your active session drops into critical reserve (`< 15%`), exhausts a primary pool (e.g., `< 15%` Claude/GPT even while Gemini & Argon remain high), or requires **`RE-AUTH`** / **`VERIFY NEEDED`**, Charlier picks the strongest unclaimed healthy standby in memory (`< 0.1ms`) using **Healthy-Tier Bands**: healthy paid tiers win by plan rank first (e.g., `Ultra 50%` beats `Pro 100%`; Antigravity requires `Gemini >= 50%` and `Claude >= 25%`), low paid tiers (`15-49%`) yield to healthy paid tiers (`Pro 100%` beats `Ultra 20%`) while still beating `Free 100%`, and `Free`-only pools sort by max headroom. Surfaces a one-click **`⇄ Switch Best`** pit-stop banner + **`NEXT UP`** card badge in Cockpit, clickable **`Best Standby`** + **`NEXT`** pills in the Hover Matrix, and `$(zap) NEXT UP` in QuickPick.
+- **Plan-Tier Sorting, Inactive-Only Delete Guard & Keyboard Search**: Remaining standby profiles sort automatically by plan tier (`ULTRA > ENTERPRISE > PRO > TEAM > EDU > PLUS > API_KEY > FREE`), breaking ties by recency. Standby cards include collapsible `≡` accordion drawers for `5h`/`7d` reset countdowns, Code Review Pool (`Included` / `On demand` / live `%`), and `reset credits`, while active IDE Hero and `CLI CLAIMED` delete icons (`✕`) remain disabled with guidance tooltips to avoid post-delete re-detection loops. Once a deck reaches `6+` accounts, sticky search filters live (`/` focuses search, `Esc` clears).
+- **Zero-Flicker In-Place Updates & Retained Sync**: The Cockpit webview stays alive (`retainContextWhenHidden`) with automatic hidden-delivery sync recovery and `15s` per-provider freshness refreshes on deck flips. Deck flips (`Antigravity ⇄ Codex` via `◀` / `▶` in the Hover footer or `‹ Antigravity | Codex ›` in the Cockpit), tier switches, quota refreshes, new-account sign-ins, theme switches, and `CLI Only` claim updates reconcile smoothly in place without document teardown reloads, dial re-spins, `full -> empty -> full` oscillation, or idle lower-panel blinks.
+
+### 2. Revocation-Safe Swaps, Google Verification Gate & Honest `STALE` Telemetry
+- **Startup & Background OAuth Heartbeat**: On activation and refresh, Charlier validates both active and dormant credentials against Google Cloud Code (`oauth2.googleapis.com` / `v1internal`) and OpenAI Codex (`auth.openai.com/oauth/token` / `wham/usage`), deduplicating rapid probes and backing off failed attempts automatically.
+- **Google Post-Login Verification Gate Awareness (`VERIFY NEEDED`)**: When Google gates a newly signed-in or standby Antigravity account behind phone/QR verification (`VALIDATION_REQUIRED` / `403 PERMISSION_DENIED: "Verify your account to continue"`), Charlier extracts the state across gRPC-Web trailers, `loadCodeAssist.ineligibleTiers`, Cloud Code HTTPS, and daemon logs. It surfaces **`VERIFY NEEDED`** in amber across the Cockpit (Hero banner + standby cards + drawers), Hover Matrix (`VERIFY NEEDED` pill + `*verify needed*` snap), and Status Bar (`VERIFY NEEDED` shield alert), wires a one-click **`Verify Account`** action (`charlier.verifyAccount`), hard-locks **`CLI Only`** (`CLI Locked`) on unverified standby accounts until verified in the IDE, and auto-heals to live quota the moment verification completes.
+- **1st-Click Dial Reset, Post-Login Detection Toasts & Zero-Duplication Vault**: Clicking **`+ Add Account`** immediately clears the active Hero dial and Status Bar on the first click while guarding against stale pre-logout daemon responses. Post-mute file watcher trailing callbacks, cross-OS IDE SQLite (`state.vscdb`) watchers, Codex `app-server` login notifications, and active login polling detect new sign-ins automatically - firing a provider-specific **"Save it as a profile in your vault?"** notification toast (`Save to Vault` / `Later`) alongside the **`UNSAVED ACTIVE SESSION`** banner in the Cockpit and Hover Matrix. Saving or renaming deduplicates by email, `chatgpt_account_id` (supporting Personal + Team workspaces under one email), and refresh token in place so duplicate profiles never pile up.
+- **Zero-Revocation Codex Swaps & Re-Logins**: Switching accounts, triggering **`+ Add Account`**, or running **`Start Re-Login`** never sends a server-side `account/logout` revocation RPC. Charlier swaps cleanly off disk and respawns `codex app-server` logged out so sibling refresh tokens stay alive.
+- **Smart Quota Clock Rollover & Honest `RE-AUTH` / `STALE` Demotion**: When a `5h` or `7d` reset window passes on a healthy standby profile, Charlier rolls the displayed gauge back to `100%` automatically without burning an extra OAuth refresh. If a session is revoked or expired (`invalid_grant`, `token_revoked`, `refresh_token_reused`, HTTP `401`), Charlier freezes clock rollover and tags the account `RE-AUTH` + `STALE` across the Status Bar (`RE-AUTH (stale)`), Hover Matrix (muted `#7E909B` gauges + crimson `stale · <age>`), and Cockpit cards, gating switches with explicit **`Switch & Start Re-Login`** or **`Switch Only (Manual Login)`** choices.
+- **Auto-Save Before Switch & Distinct Recovery Toasts**: Switching away from an unsaved active IDE login automatically backs it up into the vault with its live quota snapshot first. Antigravity and Codex external logins are probed independently (persisting **`Later`** dismissals only for active unsaved sessions), and recovering a `RE-AUTH` or `VERIFY NEEDED` account emits a dedicated sync notification.
+
+### 3. Focus-Aware Provider Auto-Switch
+- **Follows Your Work (`charlier.autoSwitchProvider`)**: When focused, moving between Antigravity and Codex editors, webviews, diff/custom tabs, active `codex` / `agy` CLI terminals, live `codex app-server` turn streams, and host-scoped conversation activity automatically flips both the Status Bar pill and Cockpit deck (`"auto"` | `"off"`). *(VS Code's public Extension API does not emit events on bare Activity Bar / panel icon clicks without an open tab, terminal, or stream write.)*
+- **Host Startup Primacy, 1.2s Manual Pin & Zero Focus Storms**: Inside Antigravity IDE, Charlier always boots with Antigravity primary (`selectedProviderByHost`), while standard VS Code remembers your last manual deck across restarts. Automatic focus switches never overwrite persisted defaults, manual flips pin your selection for `1.2s` (`manualProviderPinUntil`) so background events never fight your click, and window-focus checks compare an `mtimeMs + size` and cached session identity fingerprint before touching the daemon or network.
+
+---
+
+<a id="multi-window--cli-concurrency-cli-only-mode"></a>
+## Multi-Window & CLI Concurrency (`CLI Only` Mode)
+
+Both Google Antigravity and OpenAI Codex read credentials at process startup. Clicking **`CLI Only`** on any standby card (or the terminal action button in either QuickPick menu, or running **`Charlier: Switch Codex CLI Only`**) preflights cross-OS binary resolution (`chatgpt.cliExecutable` with `~/` expansion -> `PATH` -> sorted `openai.chatgpt-*` bundles -> `~/.gemini/bin` / OS package managers, showing a clear modal install guide if missing) and gives that profile its own isolated sandbox home under `~/.gemini/charlier/cli-homes/` so you can keep **Account A pinned in the IDE** while running **Accounts B, C, and D** concurrently in integrated terminals:
+
+1. **IDE Stays Untouched**: Your Hero account, global `~/.codex/auth.json`, `~/.gemini/*`, OS keyring, file watchers, and caches never change when launching `CLI Only`.
+2. **Per-Profile Isolated CLI Homes**:
+   - **OpenAI Codex**: Stages `CODEX_HOME` at `~/.gemini/charlier/cli-homes/codex/<profileId>` with isolated `auth.json` (`0600`), root `cli_auth_credentials_store = "file"` in `config.toml` (stripping OS keyring store conflicts), and mirrored `skills`, `plugins`, `rules`, and `AGENTS.md`, then launches `codex --no-daemon`.
+   - **Google Antigravity**: Stages an isolated home at `~/.gemini/charlier/cli-homes/antigravity/<profileId>` containing `.gemini/antigravity-cli/antigravity-oauth-token`, `google_accounts.json`, `oauth_creds.json`, and safe shared devtools/shell dotfiles (isolating Linux `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and `XDG_STATE_HOME` under `.xdg/` without symlinking `.config` or `.local`), bypassing shared OS keyrings cleanly across Windows, macOS, and Linux before launching `agy`.
+3. **1-Terminal-Per-Profile Claim Tracking & Token Sync-Back**: The standby card badges **`CLI CLAIMED`** and flips to **`>_ Focus CLI`**, focusing the running terminal instead of spawning colliding duplicates. Exiting the CLI (`CTRL+C` / `/exit`) or closing its terminal releases the claim, re-running `codex` / `agy` in the same terminal re-claims it automatically (`onDidStartTerminalShellExecution`), `RE-AUTH` targets prompt before launch (**`Launch CLI Anyway`**), and any rotated single-use refresh tokens inside an isolated terminal sync back to the vault on exit/close/switch/refresh.
+
+---
+
+## Provider Support & Roadmap
+
+| Provider | Support | Roadmap & Capabilities |
+| :---: | :---: | :--- |
+| <img src="media/providers/antigravity.png" alt="Google Antigravity" width="38" height="38" /><br/>**Google Antigravity** | **Shipped** | Full IDE + isolated `agy` CLI vault (`Free` / `Pro` / `Ultra`), gRPC-Web daemon + Cloud Code HTTPS telemetry (`Gemini`, `Claude & GPT`, `Argon`, `Carbon`), and `~800ms` surgical daemon respawn. |
+| <img src="media/providers/codex.png" alt="OpenAI Codex" width="38" height="38" /><br/>**OpenAI Codex** | **Shipped** | Full IDE + isolated `codex --no-daemon` vault (`Free` / `Plus` / `Pro` / `Team` / `Enterprise` / `Edu` / `API Key`), `~120ms` `wham/usage` HTTPS telemetry (`5h`, `7d`, `Code Review`, `Reset Credits`), RTR safety, and `~100ms` stdio graft. |
+| <img src="media/providers/claude.png" alt="Anthropic Claude Code" width="38" height="38" /><br/>**Anthropic Claude Code** | **Planned** | Co-running `anthropic.claude-code` extension detection is already active. Planned next: multi-account Anthropic OAuth/session vault, session + weekly usage meters, single-extension hot-swap, and isolated `claude` CLI concurrency. |
+| <img src="media/providers/kimi.png" alt="Moonshot AI Kimi Code" width="38" height="38" /><br/>**Moonshot AI Kimi Code** | **Planned** | Co-running `moonshot-ai.kimi-code` / `kimi.kimi-code` extension detection is already active. Planned next: dedicated Kimi Code profile vault, live Moonshot quota telemetry inside the Cockpit, and isolated parallel `kimi` terminal workspaces. |
+| <img src="media/providers/cli.png" alt="Standalone charlier CLI" width="38" height="38" /><br/>**Standalone `charlier` CLI** | **Planned** | Zero-binary Node.js CLI (`npx charlier switch`, `charlier status`, `charlier quota`, `charlier exec`) operating directly on the exact same `~/.gemini/charlier/` vault for `tmux`, SSH, and Neovim users without opening an IDE. |
+
+---
+
+<a id="cross-os-architecture"></a>
+## Cross-OS Architecture & Clean Binaries
+
+### Zero Shell Spawns & Clean Native Keyring
+Windows extensions that touch Credential Manager typically spawn hidden `powershell.exe` / `.bat` scripts, pull C++ toolchains via `node-gyp` on install, or unpack unsigned `.exe` helpers - patterns behavioral antivirus and EDR engines routinely flag.
+
+Charlier ships **zero runtime `npm` dependencies**, **zero shell credential workers**, and **zero unsigned `.exe` droppers**:
+- **15 KB `#![no_std]` Rust Win32 N-API Module (`native/wincred-win32-x64.node`)**: Linked with `-nostdlib` and zero external Rust crates, loaded directly in-process by the VS Code Extension Host (`<10ms` roundtrips, zero child processes spawned).
+- **Minimal, Auditable Win32 Surface**: Exports only three Credential Manager wrappers (`readCredential` -> `CredReadW`, `writeCredential` -> `CredWriteW`, `deleteCredential` -> `CredDeleteW`) using only `advapi32.dll` and `kernel32.dll` heap/UTF-8 helpers, with volatile heap secret zeroing, zero network calls, zero registry access, and zero file writes.
+- **Full Reproducible Source Included**: All 512 lines of Rust sit right in [`src-native/wincred/src/lib.rs`](src-native/wincred/src/lib.rs) (`npm run build:wincred`), so anyone can inspect the lines or rebuild the `.node` addon deterministically (end users never need Rust installed).
+
+| OS | Antigravity Credential Store | OpenAI Codex Store | Surgical Reload & CLI Isolation |
+| :---: | :--- | :--- | :--- |
+| <img src="media/os/windows.png" alt="Windows" width="34" height="34" /><br/>**Windows** | `Advapi32.dll` (`CredReadW`/`CredWriteW`/`CredDeleteW`) via 15 KB `#![no_std]` N-API addon + `cmdkey.exe` delete fallback + `~/.gemini/*.json` *(passive `state.vscdb` watch on `+ Add Account`)* | `%USERPROFILE%\.codex\auth.json` (`0600`) | **Codex**: `~100ms` stdio graft (`codex.exe app-server`); isolated `CODEX_HOME` + `config.toml` for `CLI Only`.<br/>**Antigravity**: `~800ms` local `--hub` PID daemon respawn (`2`-in-`10m` crash guard); isolated `HOME`/`USERPROFILE` + `WSL_DISTRO_NAME` file store for `CLI Only`. |
+| <img src="media/os/macos.png" alt="macOS" width="34" height="34" /><br/>**macOS** | `/usr/bin/security` Keychain (`find-generic-password` / `add-generic-password -U`) + `~/.gemini/*.json` *(passive `state.vscdb` watch on `+ Add Account`)* | `~/.codex/auth.json` (`0600`) + optional Keychain cleanup (`Codex Auth` / `codex`) | **Codex**: `~100ms` stdio graft (`POSIX` lock wait); isolated `CODEX_HOME` for `CLI Only`.<br/>**Antigravity**: `~800ms` local `--hub` PID daemon respawn (`2`-in-`10m` crash guard); isolated `HOME` + `WSL_DISTRO_NAME` file store for `CLI Only`. |
+| <img src="media/os/linux.png" alt="Linux" width="34" height="34" /><br/>**Linux** | `secret-tool` (`libsecret` / D-Bus Secret Service) + headless `~/.gemini/oauth_creds.json` fallback *(passive `state.vscdb` watch on `+ Add Account`)* | `~/.codex/auth.json` (`0600`) + optional `secret-tool` cleanup | **Codex**: `~100ms` stdio graft (`POSIX` lock wait); isolated `CODEX_HOME` for `CLI Only`.<br/>**Antigravity**: `~800ms` local `--hub` PID daemon respawn (`2`-in-`10m` crash guard); isolated `HOME` + `.xdg/` XDG dirs + D-Bus/Keyring unset for file-backed `CLI Only`. |
+
+All vault snapshots live locally under `~/.gemini/charlier/` using atomic `0o600` temp-file writes and rename retries (safe across Windows file locks, macOS, and Linux).
 
 ---
 
 ## Quick Start
 
 ### Install
-* **Antigravity / Open VSX**: Search **`Sernine.charlier`** in the Extensions sidebar, or grab it from **[Open VSX](https://open-vsx.org/extension/Sernine/charlier)**.
-* **VS Code Marketplace**: Install directly from **[Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=Sernine.charlier)** (`ext install Sernine.charlier`).
-* **Manual `.vsix`**: Download the latest `.vsix` from **[GitHub Releases](https://github.com/prince-sernine/charlier/releases)** and run `Extensions: Install from VSIX...`.
+- **Antigravity / Open VSX**: Search **`Sernine.charlier`** in Extensions, or install from **[Open VSX](https://open-vsx.org/extension/Sernine/charlier)**.
+- **VS Code Marketplace**: Install from **[Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=Sernine.charlier)** (`ext install Sernine.charlier`).
+- **Manual `.vsix`**: Grab the latest release from **[GitHub Releases](https://github.com/prince-sernine/charlier/releases)** and run `Extensions: Install from VSIX...`.
 
-### 1. Save Your Current Account
-1. Open VS Code with your Antigravity account signed in.
-2. Click **`Charlier`** in the bottom-right status bar (or run `Charlier: Save Current Profile` from the Command Palette).
-3. Give it a name (`Main Pro`, `Alt Pro`, `OG Free`).
-
-### 2. Add Another Account
-1. Click the Charlier status bar item and select **`Add new account`**.
-2. Charlier backs up your current session's latest tokens into your vault and clears the active login slot.
-3. Sign in with your next Google account in the Antigravity sidebar.
-4. Click the **`Save active account`** card pinned at the top of the Charlier menu to lock it into your vault.
-
-### 3. Switch Any Time
-* **From the Hover Panel**: Hover over the status bar pill to check remaining quota across all your saved accounts, then click any profile name in the table to switch immediately.
-* **From the QuickPick Menu**: Click the status bar pill and pick an inactive profile. Charlier swaps the credentials and soft-restarts the extension host automatically.
+### Use
+1. **Open Cockpit or Hover Pill**: Click the Charlier card-cut glyph in the Activity Bar, or hover the unified Status Bar pill in the bottom right.
+2. **Switch Decks**: Click **`‹ Antigravity | Codex ›`** in the Cockpit header or **`◀ Antigravity · Codex ▶`** in the hover overlay footer (view-only, zero reloads).
+3. **Save, Switch, or Claim a CLI**: Click **`Save to Vault`** on an unsaved login, **`+ Add Account`** for a clean zero-revocation login slot, **`⇄ Switch`** to hot-swap the IDE, or **`CLI Only`** on any standby card to launch a dedicated isolated terminal.
 
 ---
 
 ## Commands & Settings
 
-| Command | ID | Description |
+### Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`)
+
+| Command | Title |
+| :--- | :--- |
+| `charlier.switchProfile` | **Charlier: Switch Profile** |
+| `charlier.switchProvider` | **Charlier: Switch Provider Deck (Antigravity / Codex)** |
+| `charlier.openCockpit` | **Charlier: Open Quota & Account Cockpit** |
+| `charlier.switchCodexCliOnly` | **Charlier: Switch Codex CLI Only (Zero IDE Reload)** |
+| `charlier.viewQuota` | **Charlier: View Quota & Model Limits** |
+| `charlier.refreshQuota` | **Charlier: Refresh Limits** |
+| `charlier.saveProfile` | **Charlier: Save Current Profile** |
+| `charlier.addAccount` | **Charlier: Add New Account** |
+| `charlier.verifyAccount` | **Charlier: Verify Account** |
+| `charlier.renameProfile` | **Charlier: Rename Profile** |
+| `charlier.deleteProfile` | **Charlier: Delete Profile** |
+| `charlier.openVault` | **Charlier: Open Profiles Directory** |
+| `charlier.restartExtensionHost` | **Charlier: Restart Extension Host (Soft Reload)** |
+| `charlier.reloadWindow` | **Charlier: Reload Window** |
+
+### Extension Settings
+
+| Setting | Default | Description |
 | :--- | :--- | :--- |
-| **Charlier: Switch Profile** | `charlier.switchProfile` | Opens the profile switcher and vault menu. |
-| **Charlier: View Quota & Model Limits** | `charlier.viewQuota` | Opens the 5-hour and 7-day quota breakdown for any profile. |
-| **Charlier: Refresh Limits** | `charlier.refreshQuota` | Refreshes live limits for both the active session and dormant vault profiles. |
-| **Charlier: Save Current Profile** | `charlier.saveProfile` | Saves the active Antigravity session into the vault. |
-| **Charlier: Add New Account** | `charlier.addAccount` | Backs up the active session and prepares Antigravity for a new Google sign-in. |
-| **Charlier: Rename Profile** | `charlier.renameProfile` | Renames a saved profile in the vault. |
-| **Charlier: Delete Profile** | `charlier.deleteProfile` | Removes a saved profile from `~/.gemini/charlier/profiles/`. |
-| **Charlier: Open Profiles Directory** | `charlier.openVault` | Opens `~/.gemini/charlier/profiles/` in your system file manager. |
-| **Charlier: Restart Extension Host (Soft Reload)** | `charlier.restartExtensionHost` | Soft-reloads extensions and the language server without closing tabs. |
-| **Charlier: Reload Window** | `charlier.reloadWindow` | Reloads the full VS Code window and language server. |
+| `charlier.antigravitySurgicalReload` | `true` | Respawn only the local `agy` daemon (`~800ms`) on Antigravity switch instead of restarting the Extension Host. |
+| `charlier.codexSurgicalReload` | `true` | Hot-swap the `codex app-server` stdio stream in memory (`~100ms`) on Codex switch without restarting the Extension Host. |
+| `charlier.showStatusBarQuota` | `true` | Display remaining capacity percentages inline inside the unified Status Bar pill. |
+| `charlier.autoRestartExtensionHost` | `true` | Soft-restart the Extension Host on switch when surgical reload is disabled or no sibling provider is active. |
+| `charlier.autoSwitchProvider` | `"auto"` | When focused, automatically flip the Status Bar pill and Cockpit when focusing Antigravity/Codex editors, tabs, turn streams, or CLI terminals (`"auto"` or `"off"`). |
 
-### Configuration
+### Themeable Status Bar Color Tokens
 
-* `charlier.autoRestartExtensionHost` *(boolean, default: `true`)*: Automatically soft-restart the VS Code extension host when switching profiles so Antigravity connects to the new account immediately without a full window reload.
+Customize the Status Bar pill colors in `settings.json` under `workbench.colorCustomizations`:
+
+| Color Token | Dark | Light | High Contrast (Dark / Light) |
+| :--- | :--- | :--- | :--- |
+| `charlier.antigravityAccent` | `#92D6BE` | `#166F52` | `#9EF5D6` / `#0C593F` |
+| `charlier.codexAccent` | `#8DBCF6` | `#1D5EA8` | `#AED2FF` / `#124685` |
+| `charlier.quotaHealthy` | `#7FD6AE` | `#127A58` | `#8FF0C2` / `#0B5E42` |
+| `charlier.quotaWarn` | `#E8BA6F` | `#9A6316` | `#FFD27D` / `#754808` |
+| `charlier.quotaCritical` | `#E88585` | `#AD3D3D` | `#FF9A9A` / `#8A1F1F` |
 
 ---
 
 ## Vault Layout
 
-All credentials stay local on your machine inside `~/.gemini/`:
+All credentials stay local on your machine inside `~/.gemini/` and `~/.codex/`:
 
 ```text
+~/.codex/
+└── auth.json                                  # Active OpenAI Codex IDE credentials (0600)
+
 ~/.gemini/
-├── google_accounts.json                 # Active identity pointer
-├── oauth_creds.json                     # Active OAuth session
+├── google_accounts.json                       # Active Antigravity identity pointer
+├── oauth_creds.json                           # Active Antigravity OAuth session
 └── charlier/
-    ├── state.json                       # Active profile tracker
-    └── profiles/
-        ├── main-pro/
-        │   ├── metadata.json            # Profile label, email, and cached quota snapshot
-        │   ├── keyring_credential.json  # Raw OS keyring payload backup
-        │   ├── google_accounts.json     # Account identity store
-        │   └── oauth_creds.json         # OAuth token store
-        └── og-free/
-            ├── metadata.json
-            ├── keyring_credential.json
-            ├── google_accounts.json
-            └── oauth_creds.json
+    ├── state.json                             # Active profile, host-scoped deck preference (`selectedProviderByHost`), dismissed prompts
+    ├── profiles/                              # Google Antigravity vault profiles
+    │   └── <profile-id>/
+    │       ├── metadata.json                  # Label, email, tier override, cached pools & auth state
+    │       ├── keyring_credential.json        # Raw OS keyring payload backup (0600)
+    │       ├── google_accounts.json           # Account identity store (0600)
+    │       └── oauth_creds.json               # OAuth token store (0600)
+    ├── providers/
+    │   └── codex/
+    │       └── profiles/                      # OpenAI Codex vault profiles
+    │           └── <profile-id>/
+    │               ├── metadata.json          # Label, email, account_id, cached wham/usage & auth state
+    │               └── auth.json              # Full Codex OAuth / refresh_token store (0600)
+    └── cli-homes/                             # Isolated per-profile CLI Only workspaces
+        ├── antigravity/<profile-id>/          # File-backed token home (.gemini/antigravity-cli/)
+        └── codex/<profile-id>/                # Dedicated CODEX_HOME + file-backed config.toml
 ```
 
 ---
 
-## Building from Source & Contributing
-
-Contributions, bug reports, and edge-case fixes are welcome. Keep PRs focused, dependency-free, and fast.
+## Build from Source
 
 ```bash
 git clone https://github.com/prince-sernine/charlier.git
 cd charlier
 npm install
-npm run build
-npx vsce package --no-dependencies
+npm test
+npm run package
+```
+
+Optionally rebuild the Win32 Credential Manager N-API addon (requires Rust only when editing `src-native/wincred/`):
+
+```bash
+npm run build:wincred
+```
+
+Install the generated `charlier-0.2.0.vsix` into VS Code or Antigravity IDE:
+
+```bash
+code --install-extension charlier-0.2.0.vsix --force
+antigravity-ide --install-extension charlier-0.2.0.vsix --force
 ```
 
 ---
@@ -147,4 +248,4 @@ npx vsce package --no-dependencies
 
 Copyright (c) 2026 **Sernine** ([@prince-sernine](https://github.com/prince-sernine)).
 
-The source code is open so you can read every line that touches your credentials, build it locally for your own use, or send PRs. What you can't do is rip the code or logic, slap a new name on it, and re-upload a clone to the VS Code Marketplace, Open VSX, or another public repo. See [`LICENSE`](./LICENSE) and [`NOTICE`](./NOTICE) for the full terms.
+The source code is open so you can read every line that touches your credentials, build it locally for your own personal use, or send PRs back upstream. What you may not do is rip the code, switching architecture, keyring engine, or UI, slap a new name or icon on it, and re-upload a clone or competing derivative to the Visual Studio Marketplace, Open VSX, or another public registry or repo. See [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE) for the full source-available terms and pseudonymous ownership record.

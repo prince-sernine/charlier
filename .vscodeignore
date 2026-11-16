@@ -3,13 +3,20 @@
 src/**
 src-native/**
 scripts/**
+tests/**
 art/**
 graft/**
 .ignore
 tsconfig.json
 esbuild.config.mjs
 *.local.md
+AGENTS.md
+AGENTS.override.md
+Microsoft/**
 .git/**
 .gitignore
+.trail/**
+.trail/
+*.vsix
 node_modules/**
 

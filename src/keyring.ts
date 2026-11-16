@@ -1,4 +1,7 @@
+import * as fs from 'fs';
+import { createRequire } from 'module';
 import * as os from 'os';
+import * as path from 'path';
 import { execFile, execFileSync } from 'child_process';
 
 const SERVICE_NAME = 'gemini';
@@ -6,102 +9,121 @@ const ACCOUNT_NAME = 'antigravity';
 const TARGET_NAME = `${SERVICE_NAME}:${ACCOUNT_NAME}`;
 const WIN_TARGET_NAME = `LegacyGeneric:target=${TARGET_NAME}`;
 
-const PS_NATIVE_DEF = `
-using System;
-using System.Runtime.InteropServices;
-using System.Text;
-
-public class NativeCred {
-    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    public static extern bool CredReadW(string target, int type, int reservedFlag, out IntPtr credentialPtr);
-
-    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    public static extern bool CredWriteW(ref CREDENTIAL credential, int flags);
-
-    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    public static extern bool CredDeleteW(string target, int type, int flags);
-
-    [DllImport("advapi32.dll", SetLastError = true)]
-    public static extern void CredFree(IntPtr buffer);
-
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    public struct CREDENTIAL {
-        public int Flags;
-        public int Type;
-        public string TargetName;
-        public string Comment;
-        public long LastWritten;
-        public int CredentialBlobSize;
-        public IntPtr CredentialBlob;
-        public int Persist;
-        public int AttributeCount;
-        public IntPtr Attributes;
-        public string TargetAlias;
-        public string UserName;
-    }
-
-    public static string Read(string target) {
-        IntPtr ptr;
-        if (!CredReadW(target, 1, 0, out ptr)) return "";
-        try {
-            var cred = (CREDENTIAL)Marshal.PtrToStructure(ptr, typeof(CREDENTIAL));
-            if (cred.CredentialBlobSize <= 0 || cred.CredentialBlob == IntPtr.Zero) return "";
-            byte[] bytes = new byte[cred.CredentialBlobSize];
-            Marshal.Copy(cred.CredentialBlob, bytes, 0, cred.CredentialBlobSize);
-            return Encoding.UTF8.GetString(bytes);
-        } finally {
-            CredFree(ptr);
-        }
-    }
-
-    public static bool Write(string target, string user, string secret) {
-        byte[] bytes = Encoding.UTF8.GetBytes(secret);
-        IntPtr blobPtr = Marshal.AllocHGlobal(bytes.Length);
-        try {
-            Marshal.Copy(bytes, 0, blobPtr, bytes.Length);
-            var cred = new CREDENTIAL();
-            cred.Type = 1;
-            cred.TargetName = target;
-            cred.UserName = user;
-            cred.CredentialBlob = blobPtr;
-            cred.CredentialBlobSize = bytes.Length;
-            cred.Persist = 2;
-            return CredWriteW(ref cred, 0);
-        } finally {
-            Marshal.FreeHGlobal(blobPtr);
-        }
-    }
+interface WinCredAddon {
+  readCredential(targetName: string): string | null;
+  writeCredential(targetName: string, userName: string, secretUtf8: string): boolean;
+  deleteCredential(targetName: string): boolean;
 }
-`;
+
+function escapeDarwinQuotable(val: string): string {
+  return `"${val.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
+export function hasLinuxDbusSession(
+  env: NodeJS.ProcessEnv = process.env
+): boolean {
+  return Boolean(env.DBUS_SESSION_BUS_ADDRESS);
+}
+
+function resolveWinAddonPath(extensionPath?: string): string | null {
+  const filename = `wincred-win32-${process.arch}.node`;
+  const candidates = [
+    extensionPath ? path.join(extensionPath, 'native', filename) : '',
+    typeof __dirname === 'string' && __dirname
+      ? path.resolve(__dirname, '..', 'native', filename)
+      : '',
+    typeof __dirname === 'string' && __dirname ? path.join(__dirname, 'native', filename) : '',
+    path.resolve(process.cwd(), 'native', filename)
+  ];
+
+  for (const candidate of candidates) {
+    if (candidate && fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
+}
 
 export class KeyringManager {
-  constructor(_extensionPath?: string) {
-    // Zero dependencies on external binaries - all OS native
+  private readonly extensionPath?: string;
+  private winAddon: WinCredAddon | false | null = null;
+
+  constructor(extensionPath?: string) {
+    this.extensionPath = extensionPath;
+  }
+
+  private getWinAddon(): WinCredAddon | null {
+    if (this.winAddon === false) return null;
+    if (this.winAddon) return this.winAddon;
+
+    const addonPath = resolveWinAddonPath(this.extensionPath);
+    if (!addonPath) {
+      this.winAddon = false;
+      return null;
+    }
+
+    try {
+      const req = createRequire(addonPath);
+      const loaded = req(addonPath) as Partial<WinCredAddon>;
+      if (
+        loaded &&
+        typeof loaded.readCredential === 'function' &&
+        typeof loaded.writeCredential === 'function' &&
+        typeof loaded.deleteCredential === 'function'
+      ) {
+        this.winAddon = loaded as WinCredAddon;
+        return this.winAddon;
+      }
+    } catch {}
+
+    this.winAddon = false;
+    return null;
+  }
+
+  private readWin(targetPrimary: string, targetSecondary: string): string | null {
+    const addon = this.getWinAddon();
+    if (!addon) return null;
+    try {
+      const primary = addon.readCredential(targetPrimary);
+      if (primary && primary.trim()) return primary.trim();
+      const secondary = addon.readCredential(targetSecondary);
+      return secondary && secondary.trim() ? secondary.trim() : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private writeWin(target: string, user: string, secret: string): boolean {
+    const addon = this.getWinAddon();
+    if (!addon) return false;
+    try {
+      return Boolean(addon.writeCredential(target, user, secret));
+    } catch {
+      return false;
+    }
+  }
+
+  private deleteWin(targetPrimary: string, targetSecondary: string): boolean | null {
+    const addon = this.getWinAddon();
+    if (!addon) return null;
+    try {
+      const a = addon.deleteCredential(targetPrimary);
+      const b = addon.deleteCredential(targetSecondary);
+      return Boolean(a || b);
+    } catch {
+      return false;
+    }
+  }
+
+  public dispose(): void {
+    // No persistent background child processes to tear down.
   }
 
   public read(): string | null {
     const platform = os.platform();
 
     if (platform === 'win32') {
-      try {
-        const script = `
-$typeDef = @'
-${PS_NATIVE_DEF}
-'@
-Add-Type -TypeDefinition $typeDef -ErrorAction SilentlyContinue
-$val = [NativeCred]::Read('${WIN_TARGET_NAME}')
-if ($val) { Write-Output $val }
-`;
-        const out = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
-          encoding: 'utf8',
-          windowsHide: true,
-          timeout: 4000,
-          stdio: ['ignore', 'pipe', 'ignore']
-        });
-        return out && out.trim() ? out.trim() : null;
-      } catch {
-        return null;
-      }
+      return this.readWin(WIN_TARGET_NAME, TARGET_NAME);
     }
 
     if (platform === 'darwin') {
@@ -118,6 +140,7 @@ if ($val) { Write-Output $val }
     }
 
     if (platform === 'linux') {
+      if (!hasLinuxDbusSession()) return null;
       try {
         // zalando/go-keyring on Linux indexes by 'username', while standard schemas use 'account'
         let out = '';
@@ -125,7 +148,7 @@ if ($val) { Write-Output $val }
           out = execFileSync(
             'secret-tool',
             ['lookup', 'service', SERVICE_NAME, 'username', ACCOUNT_NAME],
-            { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] }
+            { encoding: 'utf8', timeout: 1500, stdio: ['ignore', 'pipe', 'ignore'] }
           );
         } catch {}
 
@@ -134,7 +157,7 @@ if ($val) { Write-Output $val }
             out = execFileSync(
               'secret-tool',
               ['lookup', 'service', SERVICE_NAME, 'account', ACCOUNT_NAME],
-              { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] }
+              { encoding: 'utf8', timeout: 1500, stdio: ['ignore', 'pipe', 'ignore'] }
             );
           } catch {}
         }
@@ -152,33 +175,7 @@ if ($val) { Write-Output $val }
     const platform = os.platform();
 
     if (platform === 'win32') {
-      return new Promise<string | null>((resolve) => {
-        try {
-          const script = `
-$typeDef = @'
-${PS_NATIVE_DEF}
-'@
-Add-Type -TypeDefinition $typeDef -ErrorAction SilentlyContinue
-$val = [NativeCred]::Read('${WIN_TARGET_NAME}')
-if ($val) { Write-Output $val }
-`;
-          execFile(
-            'powershell.exe',
-            ['-NoProfile', '-NonInteractive', '-Command', script],
-            { encoding: 'utf8', windowsHide: true, timeout: 4000 },
-            (error, stdout) => {
-              if (error) {
-                resolve(null);
-              } else {
-                const trimmed = (stdout || '').trim();
-                resolve(trimmed ? trimmed : null);
-              }
-            }
-          );
-        } catch {
-          resolve(null);
-        }
-      });
+      return this.readWin(WIN_TARGET_NAME, TARGET_NAME);
     }
 
     if (platform === 'darwin') {
@@ -204,12 +201,13 @@ if ($val) { Write-Output $val }
     }
 
     if (platform === 'linux') {
+      if (!hasLinuxDbusSession()) return null;
       return new Promise<string | null>((resolve) => {
         try {
           execFile(
             'secret-tool',
             ['lookup', 'service', SERVICE_NAME, 'username', ACCOUNT_NAME],
-            { encoding: 'utf8', timeout: 3000 },
+            { encoding: 'utf8', timeout: 1500 },
             (_err1, stdout1) => {
               const trimmed1 = (stdout1 || '').trim();
               if (trimmed1) {
@@ -219,7 +217,7 @@ if ($val) { Write-Output $val }
               execFile(
                 'secret-tool',
                 ['lookup', 'service', SERVICE_NAME, 'account', ACCOUNT_NAME],
-                { encoding: 'utf8', timeout: 3000 },
+                { encoding: 'utf8', timeout: 1500 },
                 (_err2, stdout2) => {
                   const trimmed2 = (stdout2 || '').trim();
                   resolve(trimmed2 ? trimmed2 : null);
@@ -240,30 +238,21 @@ if ($val) { Write-Output $val }
     const platform = os.platform();
 
     if (platform === 'win32') {
-      try {
-        const b64 = Buffer.from(secret, 'utf8').toString('base64');
-        const script = `
-$typeDef = @'
-${PS_NATIVE_DEF}
-'@
-Add-Type -TypeDefinition $typeDef -ErrorAction SilentlyContinue
-$secret = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('${b64}'))
-$res = [NativeCred]::Write('${WIN_TARGET_NAME}', '${ACCOUNT_NAME}', $secret)
-if ($res) { Write-Output "OK" }
-`;
-        const out = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
-          encoding: 'utf8',
-          windowsHide: true,
-          timeout: 5000,
-          stdio: ['ignore', 'pipe', 'ignore']
-        });
-        return out.trim() === 'OK';
-      } catch {
-        return false;
-      }
+      return this.writeWin(WIN_TARGET_NAME, ACCOUNT_NAME, secret);
     }
 
     if (platform === 'darwin') {
+      if (!/[\r\n]/.test(secret)) {
+        try {
+          const stdinCmd = `add-generic-password -U -s ${escapeDarwinQuotable(SERVICE_NAME)} -a ${escapeDarwinQuotable(ACCOUNT_NAME)} -w ${escapeDarwinQuotable(secret)}\n`;
+          execFileSync('/usr/bin/security', ['-i'], {
+            input: stdinCmd,
+            timeout: 3000,
+            stdio: ['pipe', 'ignore', 'ignore']
+          });
+          return true;
+        } catch {}
+      }
       try {
         execFileSync(
           '/usr/bin/security',
@@ -277,12 +266,13 @@ if ($res) { Write-Output "OK" }
     }
 
     if (platform === 'linux') {
+      if (!hasLinuxDbusSession()) return false;
       try {
         // Store with both username and account attributes for universal Secret Service compatibility
         execFileSync(
           'secret-tool',
           ['store', '--label=Antigravity', 'service', SERVICE_NAME, 'username', ACCOUNT_NAME, 'account', ACCOUNT_NAME],
-          { input: secret, timeout: 3000, stdio: ['pipe', 'ignore', 'ignore'] }
+          { input: secret, timeout: 1500, stdio: ['pipe', 'ignore', 'ignore'] }
         );
         return true;
       } catch {
@@ -297,45 +287,43 @@ if ($res) { Write-Output "OK" }
     const platform = os.platform();
 
     if (platform === 'win32') {
-      return new Promise<boolean>((resolve) => {
-        try {
-          const b64 = Buffer.from(secret, 'utf8').toString('base64');
-          const script = `
-$typeDef = @'
-${PS_NATIVE_DEF}
-'@
-Add-Type -TypeDefinition $typeDef -ErrorAction SilentlyContinue
-$secret = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('${b64}'))
-$res = [NativeCred]::Write('${WIN_TARGET_NAME}', '${ACCOUNT_NAME}', $secret)
-if ($res) { Write-Output "OK" }
-`;
-          execFile(
-            'powershell.exe',
-            ['-NoProfile', '-NonInteractive', '-Command', script],
-            { windowsHide: true, timeout: 5000 },
-            (error, stdout) => {
-              if (error) {
-                resolve(false);
-              } else {
-                resolve((stdout || '').trim() === 'OK');
-              }
-            }
-          );
-        } catch {
-          resolve(false);
-        }
-      });
+      return this.writeWin(WIN_TARGET_NAME, ACCOUNT_NAME, secret);
     }
 
     if (platform === 'darwin') {
       return new Promise<boolean>((resolve) => {
-        try {
+        if (/[\r\n]/.test(secret)) {
           execFile(
             '/usr/bin/security',
             ['add-generic-password', '-U', '-s', SERVICE_NAME, '-a', ACCOUNT_NAME, '-w', secret],
             { timeout: 3000 },
-            (error) => resolve(!error)
+            (err2) => resolve(!err2)
           );
+          return;
+        }
+        try {
+          const stdinCmd = `add-generic-password -U -s ${escapeDarwinQuotable(SERVICE_NAME)} -a ${escapeDarwinQuotable(ACCOUNT_NAME)} -w ${escapeDarwinQuotable(secret)}\n`;
+          const child = execFile(
+            '/usr/bin/security',
+            ['-i'],
+            { timeout: 3000 },
+            (error) => {
+              if (!error) {
+                resolve(true);
+                return;
+              }
+              execFile(
+                '/usr/bin/security',
+                ['add-generic-password', '-U', '-s', SERVICE_NAME, '-a', ACCOUNT_NAME, '-w', secret],
+                { timeout: 3000 },
+                (err2) => resolve(!err2)
+              );
+            }
+          );
+          if (child.stdin) {
+            child.stdin.write(stdinCmd);
+            child.stdin.end();
+          }
         } catch {
           resolve(false);
         }
@@ -343,12 +331,13 @@ if ($res) { Write-Output "OK" }
     }
 
     if (platform === 'linux') {
+      if (!hasLinuxDbusSession()) return false;
       return new Promise<boolean>((resolve) => {
         try {
           const child = execFile(
             'secret-tool',
             ['store', '--label=Antigravity', 'service', SERVICE_NAME, 'username', ACCOUNT_NAME, 'account', ACCOUNT_NAME],
-            { timeout: 3000 },
+            { timeout: 1500 },
             (error) => resolve(!error)
           );
           if (child.stdin) {
@@ -368,8 +357,16 @@ if ($res) { Write-Output "OK" }
     const platform = os.platform();
 
     if (platform === 'win32') {
+      const nativeRes = this.deleteWin(WIN_TARGET_NAME, TARGET_NAME);
+      if (nativeRes !== null) {
+        return nativeRes;
+      }
       return new Promise<boolean>((resolve) => {
-        execFile('cmdkey.exe', [`/delete:${WIN_TARGET_NAME}`], { windowsHide: true, timeout: 3000 }, (error) => resolve(!error));
+        execFile('cmdkey.exe', [`/delete:${WIN_TARGET_NAME}`], { windowsHide: true, timeout: 3000 }, (err1) => {
+          execFile('cmdkey.exe', [`/delete:${TARGET_NAME}`], { windowsHide: true, timeout: 3000 }, (err2) => {
+            resolve(!err1 || !err2);
+          });
+        });
       });
     }
 
@@ -380,10 +377,21 @@ if ($res) { Write-Output "OK" }
     }
 
     if (platform === 'linux') {
+      if (!hasLinuxDbusSession()) return false;
       return new Promise<boolean>((resolve) => {
-        execFile('secret-tool', ['clear', 'service', SERVICE_NAME, 'username', ACCOUNT_NAME], { timeout: 3000 }, () => {
-          execFile('secret-tool', ['clear', 'service', SERVICE_NAME, 'account', ACCOUNT_NAME], { timeout: 3000 }, (err2) => resolve(!err2));
-        });
+        execFile(
+          'secret-tool',
+          ['clear', 'service', SERVICE_NAME, 'username', ACCOUNT_NAME],
+          { timeout: 1500 },
+          (err1) => {
+            execFile(
+              'secret-tool',
+              ['clear', 'service', SERVICE_NAME, 'account', ACCOUNT_NAME],
+              { timeout: 1500 },
+              (err2) => resolve(!err1 || !err2)
+            );
+          }
+        );
       });
     }
 
@@ -394,17 +402,23 @@ if ($res) { Write-Output "OK" }
     const platform = os.platform();
 
     if (platform === 'win32') {
-      try {
-        // Fast Microsoft signed system command
-        execFileSync('cmdkey.exe', [`/delete:${WIN_TARGET_NAME}`], {
-          windowsHide: true,
-          timeout: 3000,
-          stdio: ['ignore', 'ignore', 'ignore']
-        });
-        return true;
-      } catch {
-        return false;
+      const nativeRes = this.deleteWin(WIN_TARGET_NAME, TARGET_NAME);
+      if (nativeRes !== null) {
+        return nativeRes;
       }
+      let deletedAny = false;
+      for (const target of [WIN_TARGET_NAME, TARGET_NAME]) {
+        try {
+          // Fast Microsoft signed system command fallback
+          execFileSync('cmdkey.exe', [`/delete:${target}`], {
+            windowsHide: true,
+            timeout: 3000,
+            stdio: ['ignore', 'ignore', 'ignore']
+          });
+          deletedAny = true;
+        } catch {}
+      }
+      return deletedAny;
     }
 
     if (platform === 'darwin') {
@@ -421,25 +435,25 @@ if ($res) { Write-Output "OK" }
     }
 
     if (platform === 'linux') {
+      if (!hasLinuxDbusSession()) return false;
+      let cleared = false;
       try {
-        try {
-          execFileSync(
-            'secret-tool',
-            ['clear', 'service', SERVICE_NAME, 'username', ACCOUNT_NAME],
-            { timeout: 3000, stdio: ['ignore', 'ignore', 'ignore'] }
-          );
-        } catch {}
-        try {
-          execFileSync(
-            'secret-tool',
-            ['clear', 'service', SERVICE_NAME, 'account', ACCOUNT_NAME],
-            { timeout: 3000, stdio: ['ignore', 'ignore', 'ignore'] }
-          );
-        } catch {}
-        return true;
-      } catch {
-        return false;
-      }
+        execFileSync(
+          'secret-tool',
+          ['clear', 'service', SERVICE_NAME, 'username', ACCOUNT_NAME],
+          { timeout: 3000, stdio: ['ignore', 'ignore', 'ignore'] }
+        );
+        cleared = true;
+      } catch {}
+      try {
+        execFileSync(
+          'secret-tool',
+          ['clear', 'service', SERVICE_NAME, 'account', ACCOUNT_NAME],
+          { timeout: 3000, stdio: ['ignore', 'ignore', 'ignore'] }
+        );
+        cleared = true;
+      } catch {}
+      return cleared;
     }
 
     return false;

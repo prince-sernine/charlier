@@ -1,8 +1,8 @@
 {
   "name": "charlier",
-  "displayName": "Charlier: Antigravity Account Switcher",
-  "description": "Instant, zero-dependency account switcher and profile vault for Google Antigravity.",
-  "version": "0.1.0",
+  "displayName": "Charlier: Antigravity & Codex Account Switcher",
+  "description": "Instant, zero-dependency account switcher, profile vault, and live quota cockpit for Google Antigravity and OpenAI Codex.",
+  "version": "0.2.0",
   "publisher": "Sernine",
   "license": "SEE LICENSE IN LICENSE",
   "repository": {
@@ -18,6 +18,8 @@
   "icon": "media/icon.png",
   "keywords": [
     "antigravity",
+    "codex",
+    "openai",
     "account switcher",
     "gemini",
     "google",
@@ -28,10 +30,53 @@
   ],
   "main": "./dist/extension.js",
   "contributes": {
+    "icons": {
+      "charlier-codex-prompt": {
+        "description": "Charlier Codex prompt",
+        "default": { "fontPath": "./media/charlier-status-v2.woff", "fontCharacter": "\\E001" }
+      },
+      "charlier-antigravity-star": {
+        "description": "Charlier Antigravity shooting star",
+        "default": { "fontPath": "./media/charlier-status-v2.woff", "fontCharacter": "\\E002" }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "charlier",
+          "title": "Charlier",
+          "icon": "media/charlier-mark.svg"
+        }
+      ]
+    },
+    "views": {
+      "charlier": [
+        {
+          "type": "webview",
+          "id": "charlier.cockpitView",
+          "name": "Quota & Account Cockpit"
+        }
+      ]
+    },
     "commands": [
       {
         "command": "charlier.switchProfile",
         "title": "Charlier: Switch Profile",
+        "category": "Charlier"
+      },
+      {
+        "command": "charlier.switchProvider",
+        "title": "Charlier: Switch Provider Deck (Antigravity / Codex)",
+        "category": "Charlier"
+      },
+      {
+        "command": "charlier.openCockpit",
+        "title": "Charlier: Open Quota & Account Cockpit",
+        "category": "Charlier"
+      },
+      {
+        "command": "charlier.switchCodexCliOnly",
+        "title": "Charlier: Switch Codex CLI Only (Zero IDE Reload)",
         "category": "Charlier"
       },
       {
@@ -60,6 +105,11 @@
         "category": "Charlier"
       },
       {
+        "command": "charlier.verifyAccount",
+        "title": "Charlier: Verify Account",
+        "category": "Charlier"
+      },
+      {
         "command": "charlier.deleteProfile",
         "title": "Charlier: Delete Profile",
         "category": "Charlier"
@@ -83,18 +133,108 @@
     "configuration": {
       "title": "Charlier",
       "properties": {
+        "charlier.antigravitySurgicalReload": {
+          "type": "boolean",
+          "default": true,
+          "description": "When switching Antigravity accounts, surgically respawn only the local agy daemon process (~800ms) so co-running extensions (such as OpenAI Codex) are never interrupted."
+        },
+        "charlier.codexSurgicalReload": {
+          "type": "boolean",
+          "default": true,
+          "description": "When switching OpenAI Codex accounts, surgically hot-swap the codex app-server stdio stream in memory (~100ms) and push live account/updated notifications to the Codex sidebar without restarting the Extension Host."
+        },
+        "charlier.showStatusBarQuota": {
+          "type": "boolean",
+          "default": true,
+          "description": "Display remaining capacity percentages inline inside the unified status bar pill."
+        },
         "charlier.autoRestartExtensionHost": {
           "type": "boolean",
           "default": true,
-          "description": "Automatically restart the VS Code extension host on profile switch to reload Antigravity instantly without reloading the entire window."
+          "description": "Automatically restart the VS Code extension host on profile switch when no other AI coding provider is running."
+        },
+        "charlier.autoSwitchProvider": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "off"
+          ],
+          "default": "auto",
+          "enumDescriptions": [
+            "When focused, automatically follow your active Antigravity and Codex editors, tabs, turn streams, and CLI terminals.",
+            "Keep your manually chosen provider deck active until you flip it."
+          ],
+          "description": "Controls whether Charlier automatically switches the lower status bar and cockpit deck when you move between Antigravity and Codex."
         }
       }
-    }
+    },
+    "colors": [
+      {
+        "id": "charlier.antigravityAccent",
+        "description": "Soothing status bar tint for the Google Antigravity provider pill.",
+        "defaults": {
+          "dark": "#92D6BE",
+          "light": "#166F52",
+          "highContrast": "#9EF5D6",
+          "highContrastLight": "#0C593F"
+        }
+      },
+      {
+        "id": "charlier.codexAccent",
+        "description": "Soothing status bar tint for the OpenAI Codex provider pill.",
+        "defaults": {
+          "dark": "#8DBCF6",
+          "light": "#1D5EA8",
+          "highContrast": "#AED2FF",
+          "highContrastLight": "#124685"
+        }
+      },
+      {
+        "id": "charlier.quotaHealthy",
+        "description": "Status bar token meter color when capacity is healthy (>= 50%).",
+        "defaults": {
+          "dark": "#7FD6AE",
+          "light": "#127A58",
+          "highContrast": "#8FF0C2",
+          "highContrastLight": "#0B5E42"
+        }
+      },
+      {
+        "id": "charlier.quotaWarn",
+        "description": "Status bar token meter color when capacity is moderate (15% - 49%).",
+        "defaults": {
+          "dark": "#E8BA6F",
+          "light": "#9A6316",
+          "highContrast": "#FFD27D",
+          "highContrastLight": "#754808"
+        }
+      },
+      {
+        "id": "charlier.quotaCritical",
+        "description": "Status bar token meter color when capacity is low (1% - 14%).",
+        "defaults": {
+          "dark": "#E88585",
+          "light": "#AD3D3D",
+          "highContrast": "#FF9A9A",
+          "highContrastLight": "#8A1F1F"
+        }
+      }
+    ]
   },
   "scripts": {
     "vscode:prepublish": "npm run build",
     "build": "node esbuild.config.mjs",
-    "package": "npm run build && npx @vscode/vsce package --no-dependencies"
+    "build:wincred": "node scripts/build-wincred.mjs",
+    "package": "npm run build && npx @vscode/vsce package --no-dependencies",
+    "test": "npm run test:quota && npm run test:isolation && npm run test:cockpit && npm run test:keyring && npm run test:focus && npm run test:latency && npm run test:flicker && npm run test:crossos",
+    "test:quota": "node --test tests/quota-values.test.mjs",
+    "test:isolation": "node --test tests/cli-isolation.test.mjs",
+    "test:cockpit": "node --test tests/cockpit.test.mjs tests/ui-contract.test.mjs",
+    "test:keyring": "node --test tests/keyring.test.mjs",
+    "test:focus": "node --test tests/focus-routing.test.mjs",
+    "test:latency": "node --test tests/latency-budget.test.mjs",
+    "test:flicker": "node --test tests/flicker-invariants.test.mjs",
+    "test:crossos": "node --test tests/cross-os.test.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
@@ -104,4 +244,3 @@
     "typescript": "^5.7.0"
   }
 }
-
