@@ -158,6 +158,18 @@ export class UIController implements vscode.Disposable {
   private hasCompletedInitialUpdate = false;
   private activeUnsavedAgyEmail: string | null = null;
   private activeUnsavedCodexKey: string | null = null;
+  private autoRefreshTimer: NodeJS.Timeout | null = null;
+  private activityRefreshTimers: Partial<Record<ActiveProviderId, NodeJS.Timeout>> = {};
+  private lastActivityRefreshAt: Record<ActiveProviderId, number> = {
+    antigravity: 0,
+    codex: 0
+  };
+  private lastStandbyAutoRefreshAt = Date.now();
+  private autoRefreshTickInFlight = false;
+  private windowFocused = true;
+  private sidebarVisible = false;
+  private lastUserInteractionAt = Date.now();
+  private lastBlurAt = 0;
 
   constructor(
     vault: Vault,
@@ -223,6 +235,7 @@ export class UIController implements vscode.Disposable {
     );
     this.statusBarItem.command = 'charlier.switchProfile';
     this.statusBarItem.show();
+    this.windowFocused = (vscode.window as any).state?.focused !== false;
   }
 
   private clearCodexUnsavedDismissal(
@@ -480,17 +493,20 @@ export class UIController implements vscode.Disposable {
       this.syncIsolatedCliHomeToVault(launched.provider, launched.profileId);
       this.launchedCliTerminals.delete(terminal);
     }
+    const released: Array<{ provider: ActiveProviderId; profileId: string }> = [];
     for (const [key, entry] of Array.from(this.claimedTerminals.entries())) {
       if (entry.terminal === terminal) {
         if (!launched) {
           this.syncIsolatedCliHomeToVault(entry.provider, entry.profileId);
         }
+        released.push({ provider: entry.provider, profileId: entry.profileId });
         this.claimedTerminals.delete(key);
         changed = true;
       }
     }
     if (changed) {
       this.scheduleUpdate(60, true);
+      this.refreshReleasedCliProfiles(released);
     }
   }
 
@@ -521,16 +537,349 @@ export class UIController implements vscode.Disposable {
     commandLine: string
   ): void {
     let changed = false;
+    const released: Array<{ provider: ActiveProviderId; profileId: string }> = [];
     for (const [key, entry] of Array.from(this.claimedTerminals.entries())) {
       if (entry.terminal !== terminal) continue;
       if (detectProviderFromTerminalCommand(commandLine) === entry.provider) {
         this.syncIsolatedCliHomeToVault(entry.provider, entry.profileId);
+        released.push({ provider: entry.provider, profileId: entry.profileId });
         this.claimedTerminals.delete(key);
         changed = true;
       }
     }
     if (changed) {
       this.scheduleUpdate(60, true);
+      this.refreshReleasedCliProfiles(released);
+    }
+  }
+
+  private refreshReleasedCliProfiles(
+    released: Array<{ provider: ActiveProviderId; profileId: string }>
+  ): void {
+    if (this.disposed || released.length === 0) return;
+    const agyIds = new Set(
+      released.filter((r) => r.provider === 'antigravity').map((r) => r.profileId)
+    );
+    const codexIds = new Set(
+      released.filter((r) => r.provider === 'codex').map((r) => r.profileId)
+    );
+    const tasks: Array<Promise<unknown>> = [];
+    if (agyIds.size > 0 && typeof (this.quotaService as any).refreshProfileIds === 'function') {
+      tasks.push(
+        (this.quotaService as any).refreshProfileIds(
+          this.vault.listProfiles(),
+          agyIds,
+          this.vault,
+          true
+        )
+      );
+    }
+    if (codexIds.size > 0 && typeof (this.codexQuotaService as any).refreshProfileIds === 'function') {
+      tasks.push(
+        (this.codexQuotaService as any).refreshProfileIds(codexIds, this.codexVault)
+      );
+    }
+    if (tasks.length > 0) {
+      Promise.allSettled(tasks)
+        .then(() => {
+          if (!this.disposed) {
+            this.scheduleUpdate(60, true);
+          }
+        })
+        .catch(() => {});
+    }
+  }
+
+  private getAutoRefreshIntervalMs(): number {
+    const raw = vscode.workspace
+      ?.getConfiguration?.('charlier')
+      ?.get<number>('autoRefreshInterval', 60);
+    if (typeof raw !== 'number' || !Number.isFinite(raw)) {
+      return 60_000;
+    }
+    if (raw <= 0) {
+      return 0;
+    }
+    return Math.max(30, Math.min(3600, Math.round(raw))) * 1000;
+  }
+
+  private isActiveForAutoRefresh(): boolean {
+    if (this.windowFocused) return true;
+    // Cross-OS Linux/Wayland & macOS Spaces fallback: if focus event was missed
+    // by the compositor but the user interacted inside VS Code after the last blur.
+    const now = Date.now();
+    return (
+      this.lastUserInteractionAt > this.lastBlurAt &&
+      now - this.lastUserInteractionAt < 90_000
+    );
+  }
+
+  public noteUserActivity(): void {
+    if (this.disposed) return;
+    this.lastUserInteractionAt = Date.now();
+  }
+
+  public startAutoRefreshLoop(): void {
+    this.stopAutoRefreshLoop();
+    if (this.disposed) return;
+    const intervalMs = this.getAutoRefreshIntervalMs();
+    if (intervalMs <= 0) return;
+
+    this.autoRefreshTimer = setInterval(() => {
+      if (this.disposed) {
+        this.stopAutoRefreshLoop();
+        return;
+      }
+      if (!this.isActiveForAutoRefresh()) {
+        return;
+      }
+      void this.runAutoRefreshTick();
+    }, intervalMs);
+    (this.autoRefreshTimer as any)?.unref?.();
+  }
+
+  public stopAutoRefreshLoop(): void {
+    if (this.autoRefreshTimer) {
+      clearInterval(this.autoRefreshTimer);
+      this.autoRefreshTimer = null;
+    }
+  }
+
+  public reconfigureAutoRefresh(): void {
+    if (this.disposed) return;
+    const intervalMs = this.getAutoRefreshIntervalMs();
+    if (intervalMs <= 0) {
+      this.stopAutoRefreshLoop();
+      return;
+    }
+    this.startAutoRefreshLoop();
+  }
+
+  public handleCockpitVisibilityChanged(visible: boolean): void {
+    if (this.disposed) return;
+    this.sidebarVisible = visible;
+    if (visible) {
+      this.noteUserActivity();
+      if (this.hasCompletedInitialUpdate) {
+        void this.runAutoRefreshTick({ forceActive: true, maxActiveAgeMs: 15_000 });
+      }
+    }
+  }
+
+  public handleWindowFocusChanged(focused: boolean): void {
+    if (this.disposed) return;
+    this.windowFocused = focused;
+    if (focused) {
+      this.noteUserActivity();
+      if (!this.autoRefreshTimer && this.getAutoRefreshIntervalMs() > 0) {
+        this.startAutoRefreshLoop();
+      }
+      if (this.hasCompletedInitialUpdate) {
+        void this.runAutoRefreshTick({ forceActive: true, maxActiveAgeMs: 20_000 });
+      }
+    } else {
+      this.lastBlurAt = Date.now();
+    }
+  }
+
+  public handleProviderActivity(
+    provider: ActiveProviderId,
+    event: 'stream' | 'turn/completed' | 'rateLimits/updated' = 'stream'
+  ): void {
+    if (this.disposed) return;
+    this.noteUserActivity();
+
+    if (provider === 'codex' && event === 'rateLimits/updated') {
+      this.lastActivityRefreshAt.codex = Date.now();
+      this.scheduleUpdate(40, true);
+      return;
+    }
+
+    const delayMs = provider === 'codex' ? 1200 : 2500;
+    const existing = this.activityRefreshTimers[provider];
+    if (existing) {
+      clearTimeout(existing);
+    }
+    const timer = setTimeout(() => {
+      delete this.activityRefreshTimers[provider];
+      if (this.disposed || this.switchesInFlight.size > 0 || this.isAwaitingNewLogin()) {
+        return;
+      }
+      const now = Date.now();
+      if (provider === 'codex') {
+        const lastCodexFetch =
+          typeof (this.codexQuotaService as any).getLastFetchTime === 'function'
+            ? (this.codexQuotaService as any).getLastFetchTime()
+            : 0;
+        if (now - lastCodexFetch < 5000) {
+          this.scheduleUpdate(40, true);
+          return;
+        }
+        if (now - this.lastActivityRefreshAt.codex < 12_000) return;
+        this.lastActivityRefreshAt.codex = now;
+        const live = this.codexVault.getLiveSessionInfo?.();
+        if (!live || live.authMode === 'apikey' || (!live.email && !live.accountId && !live.hasOAuthCreds)) {
+          return;
+        }
+        this.codexQuotaService
+          .getActiveQuotaSummary?.(this.codexVault, true)
+          ?.then((res) => {
+            if (!this.disposed && res?.metric) {
+              this.scheduleUpdate(50, true);
+            }
+          })
+          .catch(() => {});
+      } else {
+        if (now - this.lastActivityRefreshAt.antigravity < 15_000) return;
+        this.lastActivityRefreshAt.antigravity = now;
+        this.quotaService
+          .getQuotaSummary?.(true)
+          ?.then((summary) => {
+            if (!this.disposed && summary) {
+              this.scheduleUpdate(50, true);
+            }
+          })
+          .catch(() => {});
+      }
+    }, delayMs);
+    (timer as any)?.unref?.();
+    this.activityRefreshTimers[provider] = timer;
+  }
+
+  public async runAutoRefreshTick(options?: {
+    forceActive?: boolean;
+    forceStandby?: boolean;
+    maxActiveAgeMs?: number;
+  }): Promise<void> {
+    if (
+      this.disposed ||
+      this.autoRefreshTickInFlight ||
+      this.switchesInFlight.size > 0 ||
+      this.isAwaitingNewLogin()
+    ) {
+      return;
+    }
+    const forceActive = Boolean(options?.forceActive);
+    const forceStandby = Boolean(options?.forceStandby);
+    if (!forceActive && !forceStandby && !this.isActiveForAutoRefresh()) {
+      return;
+    }
+
+    this.autoRefreshTickInFlight = true;
+    try {
+      const now = Date.now();
+      const configuredMs = this.getAutoRefreshIntervalMs();
+      const effectiveIntervalMs = configuredMs > 0 ? configuredMs : 60_000;
+      const maxActiveAgeMs = options?.maxActiveAgeMs ?? Math.max(15_000, effectiveIntervalMs - 2000);
+      const standbyIntervalMs = Math.max(300_000, effectiveIntervalMs * 5);
+
+      const tasks: Array<Promise<unknown>> = [];
+      let shouldRepaint = false;
+
+      // Tier 1: Active Hero telemetry for selected provider (plus instant local loopback daemon)
+      if (this.selectedProvider === 'antigravity') {
+        const cachedAgy = this.quotaService.getCachedSummary?.();
+        const agyAge = cachedAgy?.fetchedAt ? now - cachedAgy.fetchedAt : Infinity;
+        if (agyAge >= maxActiveAgeMs && typeof this.quotaService.getQuotaSummary === 'function') {
+          shouldRepaint = true;
+          tasks.push(this.quotaService.getQuotaSummary(true).catch(() => null));
+        }
+      } else {
+        const codexLive = this.codexVault.getLiveSessionInfo?.();
+        const hasCodexSession = Boolean(
+          codexLive &&
+            codexLive.authMode !== 'apikey' &&
+            (codexLive.email || codexLive.accountId || codexLive.hasOAuthCreds)
+        );
+        const lastCodexFetch =
+          typeof (this.codexQuotaService as any).getLastFetchTime === 'function'
+            ? (this.codexQuotaService as any).getLastFetchTime()
+            : 0;
+        const codexAge = lastCodexFetch > 0 ? now - lastCodexFetch : Infinity;
+        if (
+          hasCodexSession &&
+          codexAge >= maxActiveAgeMs &&
+          typeof this.codexQuotaService.getActiveQuotaSummary === 'function'
+        ) {
+          shouldRepaint = true;
+          tasks.push(
+            this.codexQuotaService.getActiveQuotaSummary(this.codexVault, true).catch(() => null)
+          );
+        }
+      }
+
+      // Tier 2: CLI CLAIMED standby profiles refresh at active cadence so parallel terminal burn stays live
+      const claimedAgy = this.getClaimedProfileIds('antigravity');
+      const claimedCodex = this.getClaimedProfileIds('codex');
+      if (
+        claimedAgy.size > 0 &&
+        typeof (this.quotaService as any).refreshProfileIds === 'function'
+      ) {
+        const agyProfiles = this.vault.listProfiles();
+        shouldRepaint = true;
+        tasks.push(
+          (this.quotaService as any)
+            .refreshProfileIds(agyProfiles, claimedAgy, this.vault, false)
+            .catch(() => 0)
+        );
+      }
+      if (
+        claimedCodex.size > 0 &&
+        typeof (this.codexQuotaService as any).refreshProfileIds === 'function'
+      ) {
+        shouldRepaint = true;
+        tasks.push(
+          (this.codexQuotaService as any)
+            .refreshProfileIds(claimedCodex, this.codexVault)
+            .catch(() => 0)
+        );
+      }
+
+      // Tier 3: Unclaimed inactive standbys refresh gently (default every 5m while focused)
+      const standbyDue =
+        forceStandby ||
+        (configuredMs > 0 && now - this.lastStandbyAutoRefreshAt >= standbyIntervalMs);
+      if (standbyDue) {
+        this.lastStandbyAutoRefreshAt = now;
+        const agyProfiles = this.vault.listProfiles();
+        const agyState = this.vault.getState();
+        const agyLive = await this.vault.getLiveSessionInfoAsync().catch(() => null);
+        if (agyProfiles.length > 0 && typeof this.quotaService.refreshAllInactiveProfiles === 'function') {
+          this.lastAntigravityBackgroundRefreshAttempt = now;
+          shouldRepaint = true;
+          tasks.push(
+            this.quotaService
+              .refreshAllInactiveProfiles(
+                agyProfiles,
+                agyLive?.email ?? null,
+                agyState.activeProfileId,
+                this.vault,
+                false
+              )
+              .catch(() => {})
+          );
+        }
+        const codexProfiles = this.codexVault.listProfiles();
+        if (
+          codexProfiles.some((p) => p.authMode !== 'apikey') &&
+          typeof this.codexQuotaService.refreshAllProfiles === 'function'
+        ) {
+          this.lastCodexBackgroundRefreshAttempt = now;
+          shouldRepaint = true;
+          tasks.push(
+            this.codexQuotaService.refreshAllProfiles(this.codexVault).catch(() => 0)
+          );
+        }
+      }
+
+      if (tasks.length > 0) {
+        await Promise.allSettled(tasks);
+      }
+      if (!this.disposed && (shouldRepaint || this.sidebarVisible)) {
+        this.scheduleUpdate(60, true);
+      }
+    } finally {
+      this.autoRefreshTickInFlight = false;
     }
   }
 
@@ -618,6 +967,9 @@ export class UIController implements vscode.Disposable {
       },
       onViewDetails: async (provider: ActiveProviderId, profileId: string) => {
         await this.showQuotaDetails(profileId, provider);
+      },
+      onVisibilityChanged: (visible: boolean) => {
+        this.handleCockpitVisibilityChanged(visible);
       }
     };
   }
@@ -858,10 +1210,11 @@ export class UIController implements vscode.Disposable {
 
   private async performUpdate(fast = false): Promise<void> {
     if (this.disposed) return;
+    const providerAtStart = this.selectedProvider;
     // 1. Gather Antigravity state (skip blocking on daemon when Codex deck is active)
     const agyProfiles = this.vault.listProfiles();
     const agyState = this.vault.getState();
-    const skipDaemonWait = fast || this.selectedProvider !== 'antigravity';
+    const skipDaemonWait = fast || providerAtStart !== 'antigravity';
     const [agyLive, agyQuota] = await Promise.all([
       this.vault.getLiveSessionInfoAsync(),
       this.getAntigravityQuotaWithoutBlocking(skipDaemonWait)
@@ -1044,7 +1397,7 @@ export class UIController implements vscode.Disposable {
           false
         )
         .then(() => {
-          if (!this.disposed && this.selectedProvider === 'antigravity') {
+          if (!this.disposed) {
             this.scheduleUpdate(80, true);
           }
         })
@@ -1107,7 +1460,7 @@ export class UIController implements vscode.Disposable {
       this.codexQuotaService
         .refreshAllProfiles(this.codexVault)
         .then((count) => {
-          if (!this.disposed && count > 0 && this.selectedProvider === 'codex') {
+          if (!this.disposed && count > 0) {
             this.scheduleUpdate(80, true);
           }
         })
@@ -1131,7 +1484,7 @@ export class UIController implements vscode.Disposable {
           codexActiveProfile?.authStatus,
           codexAuthHealth?.authStatus,
           Date.now(),
-          120000
+          45000
         ));
     if (needsLiveCodexMetric && typeof codexSvc.getActiveQuotaSummary === 'function') {
       const cachedSummary = codexSvc.getCachedSummary?.();
@@ -1265,7 +1618,7 @@ export class UIController implements vscode.Disposable {
     this.lastFrame = frame;
     this.lastFrameAt = Date.now();
     if (!fast && !this.disposed) {
-      this.lastProviderFullUpdateAt[this.selectedProvider] = Date.now();
+      this.lastProviderFullUpdateAt[providerAtStart] = Date.now();
     }
     this.renderFrame(frame);
 
@@ -1328,7 +1681,7 @@ export class UIController implements vscode.Disposable {
       // The daemon is slow (respawning or busy): repaint cleanly once it finally answers.
       pending
         .then((late) => {
-          if (!this.disposed && late && this.selectedProvider === 'antigravity') {
+          if (!this.disposed && late) {
             this.scheduleUpdate(60, true);
           }
         })
@@ -4972,6 +5325,12 @@ export class UIController implements vscode.Disposable {
   public dispose(): void {
     this.disposed = true;
     this.stopAwaitingLoginWatch();
+    this.stopAutoRefreshLoop();
+    for (const key of Object.keys(this.activityRefreshTimers) as ActiveProviderId[]) {
+      const t = this.activityRefreshTimers[key];
+      if (t) clearTimeout(t);
+    }
+    this.activityRefreshTimers = {};
     if (this.scheduledUpdateTimer) {
       clearTimeout(this.scheduledUpdateTimer);
       this.scheduledUpdateTimer = null;

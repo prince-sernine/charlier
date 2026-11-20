@@ -8,7 +8,10 @@ import {
   getActiveOAuthCredsPath,
   getDaemonSearchDirs
 } from './constants';
-import { syncAntigravityCliHomeToVault } from './cli-isolation';
+import {
+  readAntigravityCliHomeTokenReadOnly,
+  syncAntigravityCliHomeToVault
+} from './cli-isolation';
 import {
   AuthHealthStatus,
   QuotaSummary,
@@ -264,6 +267,7 @@ export class QuotaService {
   private surgicalRespawnTimestamps: number[] = [];
   private lastRespawnAt = 0;
   private respawnInFlight = false;
+  private claimedProfileIdsProvider: (() => ReadonlySet<string>) | null = null;
   private readonly RESPAWN_WINDOW_MS = 600_000;
   private readonly SAFE_MAX_SURGICAL_RESPAWNS = 2;
   private readonly RESPAWN_COOLDOWN_MS = 4500;
@@ -275,6 +279,12 @@ export class QuotaService {
     validationUrl?: string;
     checkedAt: number;
   } | null = null;
+
+  public setClaimedProfileIdsProvider(
+    provider: (() => ReadonlySet<string>) | null
+  ): void {
+    this.claimedProfileIdsProvider = provider;
+  }
 
   public getActiveAuthHealth(email?: string | null): {
     authStatus: AuthHealthStatus;
@@ -341,6 +351,16 @@ export class QuotaService {
           return null;
         }
         if (summary) {
+          const isTransientEmpty =
+            summary.groups.length === 0 &&
+            summary.authStatus !== 'unverified' &&
+            Boolean(this.cachedSummary && this.cachedSummary.groups.length > 0) &&
+            (!summary.email ||
+              !this.cachedSummary?.email ||
+              summary.email.toLowerCase() === this.cachedSummary.email.toLowerCase());
+          if (isTransientEmpty) {
+            return this.cachedSummary;
+          }
           this.cachedSummary = summary;
           if (summary.email && summary.authStatus === 'unverified') {
             this.activeAuthHealth = {
@@ -434,7 +454,23 @@ export class QuotaService {
 
   private findActiveDaemon(): DaemonInfo | null {
     const live = this.findAllLiveDaemons();
-    return live.length > 0 ? live[0] : null;
+    if (live.length === 0) return null;
+
+    const localPids = this.findLocalHubPids();
+    if (localPids.size > 0) {
+      const localMatch = live.find((d) => typeof d.pid === 'number' && localPids.has(d.pid));
+      if (localMatch) return localMatch;
+    }
+
+    const targetDirs = new Set(
+      this.resolveHostScopedDaemonDirs().map((dir) => path.resolve(dir).toLowerCase())
+    );
+    const hostMatch = live.find((d) =>
+      d.filePath ? targetDirs.has(path.resolve(path.dirname(d.filePath)).toLowerCase()) : false
+    );
+    if (hostMatch) return hostMatch;
+
+    return live[0];
   }
 
   private findLocalHubPids(): Set<number> {
@@ -1241,47 +1277,91 @@ export class QuotaService {
     }
 
     const task = (async (): Promise<CachedQuotaMetric | null> => {
-      try {
-        syncAntigravityCliHomeToVault(profile.id);
-      } catch {}
-      const refreshToken = vault.getProfileRefreshToken(profile.id);
-      if (!refreshToken) {
-        if (profile.authStatus === 'unverified') {
+      const isClaimed = Boolean(this.claimedProfileIdsProvider?.().has(profile.id));
+      if (!isClaimed) {
+        try {
+          syncAntigravityCliHomeToVault(profile.id);
+        } catch {}
+      }
+      const cliTokenRo = readAntigravityCliHomeTokenReadOnly(profile.id);
+      const vaultAccess =
+        typeof (vault as any).getProfileAccessToken === 'function'
+          ? (vault as any).getProfileAccessToken(profile.id)
+          : null;
+      const refreshToken = vault.getProfileRefreshToken(profile.id) || cliTokenRo?.refreshToken || null;
+
+      let accessToken: string | null = null;
+      let usedMintedToken = false;
+      const minFreshExpiry = Date.now() + 120_000;
+      const bestCached =
+        cliTokenRo?.accessToken && cliTokenRo.expiryMs > (vaultAccess?.expiryMs || 0)
+          ? { accessToken: cliTokenRo.accessToken, expiryMs: cliTokenRo.expiryMs }
+          : vaultAccess;
+
+      if (bestCached?.accessToken && bestCached.expiryMs > minFreshExpiry) {
+        accessToken = bestCached.accessToken;
+      }
+
+      const mintFreshToken = async (): Promise<boolean> => {
+        if (!refreshToken) {
+          if (profile.authStatus === 'unverified') {
+            return false;
+          }
+          if (profile.tokenExpiryDate && profile.tokenExpiryDate < Date.now()) {
+            vault.updateProfileAuthHealth(profile.id, {
+              authStatus: 'expired',
+              authErrorCode: 'missing_refresh_token',
+              authCheckedAt: Date.now()
+            });
+          }
+          return false;
+        }
+        const tokenRes = await this.mintAccessTokenFromRefresh(refreshToken);
+        if (!tokenRes.ok) {
+          if (tokenRes.revoked) {
+            vault.updateProfileAuthHealth(profile.id, {
+              authStatus: 'revoked',
+              authErrorCode: tokenRes.errorCode,
+              authErrorMessage: tokenRes.errorMessage,
+              authCheckedAt: Date.now()
+            });
+          }
+          return false;
+        }
+        accessToken = tokenRes.access_token;
+        usedMintedToken = true;
+        // Persist fresh access token inside the inactive profile's vault folder only
+        vault.updateInactiveProfileToken(profile.id, tokenRes.access_token, tokenRes.expires_in);
+        return true;
+      };
+
+      if (!accessToken) {
+        const ok = await mintFreshToken();
+        if (!ok || !accessToken) {
           return profile.cachedQuota || null;
         }
-        if (profile.tokenExpiryDate && profile.tokenExpiryDate < Date.now()) {
-          vault.updateProfileAuthHealth(profile.id, {
-            authStatus: 'expired',
-            authErrorCode: 'missing_refresh_token',
-            authCheckedAt: Date.now()
-          });
-        }
-        return profile.cachedQuota || null;
       }
-
-      const tokenRes = await this.mintAccessTokenFromRefresh(refreshToken);
-      if (!tokenRes.ok) {
-        if (tokenRes.revoked) {
-          vault.updateProfileAuthHealth(profile.id, {
-            authStatus: 'revoked',
-            authErrorCode: tokenRes.errorCode,
-            authErrorMessage: tokenRes.errorMessage,
-            authCheckedAt: Date.now()
-          });
-        }
-        return profile.cachedQuota || null;
-      }
-
-      // Persist fresh access token inside the inactive profile's vault folder only
-      vault.updateInactiveProfileToken(profile.id, tokenRes.access_token, tokenRes.expires_in);
 
       const clientMetadata = this.getCloudCodeClientMetadata();
-      const [loadRes, licensesRes] = await Promise.all([
-        this.postCloudCodeJson<any>(tokenRes.access_token, '/v1internal:loadCodeAssist', {
+      let [loadRes, licensesRes] = await Promise.all([
+        this.postCloudCodeJson<any>(accessToken, '/v1internal:loadCodeAssist', {
           metadata: clientMetadata
         }),
-        this.getAICodeJson<any>(tokenRes.access_token, '/v1alpha:fetchLicenses')
+        this.getAICodeJson<any>(accessToken, '/v1alpha:fetchLicenses')
       ]);
+
+      if ((loadRes.status === 401 || licensesRes.status === 401) && !usedMintedToken) {
+        const reminted = await mintFreshToken();
+        if (!reminted || !accessToken) {
+          return profile.cachedQuota || null;
+        }
+        [loadRes, licensesRes] = await Promise.all([
+          this.postCloudCodeJson<any>(accessToken, '/v1internal:loadCodeAssist', {
+            metadata: clientMetadata
+          }),
+          this.getAICodeJson<any>(accessToken, '/v1alpha:fetchLicenses')
+        ]);
+      }
 
       if (loadRes.status === 401 || licensesRes.status === 401) {
         vault.updateProfileAuthHealth(profile.id, {
@@ -1315,12 +1395,12 @@ export class QuotaService {
             : null) || 'aicode-consumers';
 
       const [modelsRes, quotaRes] = await Promise.all([
-        this.postCloudCodeJson<any>(tokenRes.access_token, '/v1internal:fetchAvailableModels', {
+        this.postCloudCodeJson<any>(accessToken, '/v1internal:fetchAvailableModels', {
           project: resolvedProject,
           metadata: clientMetadata
         }),
         this.postCloudCodeJson<any>(
-          tokenRes.access_token,
+          accessToken,
           '/v1internal:retrieveUserQuotaSummary',
           {
             project: resolvedProject,
@@ -1407,8 +1487,8 @@ export class QuotaService {
         }
       }
 
-      let gemini7d = profile.cachedQuota?.gemini7d || gemini5h;
       let gemini7dReset = profile.cachedQuota?.gemini7dReset;
+      let gemini7d = gemini7dReset && profile.cachedQuota?.gemini7d ? profile.cachedQuota.gemini7d : gemini5h;
       if (this.isResetExpired(gemini7dReset)) {
         gemini7d = '100%';
         gemini7dReset = undefined;
@@ -1630,11 +1710,13 @@ export class QuotaService {
       };
 
       if (quotaRes.status === 401 || modelsRes.status === 401) {
-        vault.updateProfileAuthHealth(profile.id, {
-          authStatus: 'revoked',
-          authErrorCode: 'http_401',
-          authCheckedAt: Date.now()
-        });
+        if (usedMintedToken) {
+          vault.updateProfileAuthHealth(profile.id, {
+            authStatus: 'revoked',
+            authErrorCode: 'http_401',
+            authCheckedAt: Date.now()
+          });
+        }
         return profile.cachedQuota || null;
       }
 
@@ -1815,6 +1897,21 @@ export class QuotaService {
     await Promise.allSettled(
       inactive.map((p) => this.refreshInactiveProfile(p, vault, force))
     );
+  }
+
+  public async refreshProfileIds(
+    profiles: ProfileMetadata[],
+    profileIds: ReadonlySet<string>,
+    vault: Vault,
+    force = false
+  ): Promise<number> {
+    if (!profileIds.size) return 0;
+    const targets = profiles.filter((p) => profileIds.has(p.id));
+    if (targets.length === 0) return 0;
+    const settled = await Promise.allSettled(
+      targets.map((p) => this.refreshInactiveProfile(p, vault, force))
+    );
+    return settled.filter((r) => r.status === 'fulfilled' && r.value).length;
   }
 
   public renderLinenMeter(fraction: number, length = 5): string {

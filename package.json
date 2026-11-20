@@ -1,8 +1,8 @@
 {
   "name": "charlier",
   "displayName": "Charlier: Antigravity & Codex Account Switcher",
-  "description": "Instant, zero-dependency account switcher, profile vault, and live quota cockpit for Google Antigravity and OpenAI Codex.",
-  "version": "0.2.0",
+  "description": "Run multiple Antigravity & Codex CLI accounts in parallel and hot-swap IDE sessions in 100ms without restarting the VS Code Extension Host. Live quota cockpit, zero npm deps.",
+  "version": "0.2.1",
   "publisher": "Sernine",
   "license": "SEE LICENSE IN LICENSE",
   "repository": {
@@ -13,6 +13,7 @@
     "vscode": "^1.90.0"
   },
   "categories": [
+    "AI",
     "Other"
   ],
   "icon": "media/icon.png",
@@ -20,10 +21,13 @@
     "antigravity",
     "codex",
     "openai",
-    "account switcher",
     "gemini",
-    "google",
-    "quota"
+    "account switcher",
+    "multi-account",
+    "quota",
+    "rate limit",
+    "cli",
+    "chatgpt"
   ],
   "activationEvents": [
     "onStartupFinished"
@@ -165,6 +169,13 @@
             "Keep your manually chosen provider deck active until you flip it."
           ],
           "description": "Controls whether Charlier automatically switches the lower status bar and cockpit deck when you move between Antigravity and Codex."
+        },
+        "charlier.autoRefreshInterval": {
+          "type": "number",
+          "default": 60,
+          "minimum": 0,
+          "maximum": 3600,
+          "description": "Seconds between automatic background quota refreshes for the active account and CLI-claimed terminals while the editor is focused (minimum 30s when enabled; standby vault refreshes at 5x this cadence, minimum 5m; set to 0 to disable periodic polling while keeping real-time turn push updates)."
         }
       }
     },

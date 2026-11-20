@@ -19,6 +19,7 @@ export class CredentialWatcher {
   private pendingMutedEvent = false;
   private mutedUntil = 0;
   private disposed = false;
+  private started = false;
   private lastWatchedStateActiveKey: string | null = null;
   private readonly startedAt = Date.now();
   private readonly onChangeCallback: () => void;
@@ -78,6 +79,24 @@ export class CredentialWatcher {
     }, remaining + 60);
   }
 
+  private trackWatcher(w: fs.FSWatcher, onError?: () => void): void {
+    try {
+      w.on('error', () => {
+        try {
+          w.close();
+        } catch {}
+        const idx = this.watchers.indexOf(w);
+        if (idx >= 0) this.watchers.splice(idx, 1);
+        if (!this.disposed) {
+          try {
+            onError?.();
+          } catch {}
+        }
+      });
+    } catch {}
+    this.watchers.push(w);
+  }
+
   private attachCodexWatcher(codexDir: string): boolean {
     if (this.codexDirWatcher) return true;
     if (!fs.existsSync(codexDir)) return false;
@@ -93,7 +112,16 @@ export class CredentialWatcher {
         }
       });
       this.codexDirWatcher = w;
-      this.watchers.push(w);
+      this.trackWatcher(w, () => {
+        if (this.codexDirWatcher === w) {
+          this.codexDirWatcher = null;
+        }
+        this.watchWhenCreated(codexDir, () => {
+          if (this.attachCodexWatcher(codexDir) && fs.existsSync(path.join(codexDir, 'auth.json'))) {
+            this.triggerDebounced();
+          }
+        });
+      });
       return true;
     } catch (err) {
       console.warn('[Charlier] Could not attach fs.watch to .codex directory:', err);
@@ -125,14 +153,16 @@ export class CredentialWatcher {
       : targetDir;
 
     try {
+      let handled = false;
       const pw = fs.watch(ancestor, () => {
-        if (this.disposed) {
+        if (handled || this.disposed) {
           try {
             pw.close();
           } catch {}
           return;
         }
         if (fs.existsSync(targetDir)) {
+          handled = true;
           try {
             pw.close();
           } catch {}
@@ -140,17 +170,20 @@ export class CredentialWatcher {
           return;
         }
         if (nextTarget !== targetDir && fs.existsSync(nextTarget)) {
+          handled = true;
           try {
             pw.close();
           } catch {}
           this.watchWhenCreated(targetDir, onExists);
         }
       });
-      this.watchers.push(pw);
+      this.trackWatcher(pw);
     } catch {}
   }
 
   public start(): void {
+    if (this.started || this.disposed) return;
+    this.started = true;
     const geminiDir = getGeminiHomeDir();
     const attachGeminiAndSubdirs = () => {
       if (fs.existsSync(geminiDir)) {
@@ -161,7 +194,7 @@ export class CredentialWatcher {
               this.triggerDebounced();
             }
           });
-          this.watchers.push(w);
+          this.trackWatcher(w);
         } catch (err) {
           console.warn('[Charlier] Could not attach fs.watch to .gemini directory:', err);
         }
@@ -183,7 +216,7 @@ export class CredentialWatcher {
                 this.triggerDebounced();
               }
             });
-            this.watchers.push(w);
+            this.trackWatcher(w);
           } catch {}
 
           const daemonDir = path.join(antigravityDir, 'daemon');
@@ -196,7 +229,7 @@ export class CredentialWatcher {
                   this.triggerDebounced();
                 }
               });
-              this.watchers.push(dw);
+              this.trackWatcher(dw);
             } catch {}
           };
 
@@ -229,7 +262,7 @@ export class CredentialWatcher {
                     }
                     this.triggerActivityDebounced();
                   });
-                  this.watchers.push(aw);
+                  this.trackWatcher(aw);
                 } catch {}
               };
               if (fs.existsSync(actDir)) {
@@ -273,7 +306,7 @@ export class CredentialWatcher {
               this.triggerDebounced();
             }
           });
-          this.watchers.push(sw);
+          this.trackWatcher(sw);
         } catch {}
       }
     }
@@ -325,7 +358,7 @@ export class CredentialWatcher {
             }
           }
         });
-        this.watchers.push(sw);
+        this.trackWatcher(sw);
       } catch {}
     };
     if (fs.existsSync(charlierDir)) {
@@ -360,7 +393,7 @@ export class CredentialWatcher {
     if (process.platform === 'win32' || process.platform === 'darwin') {
       try {
         const w = fs.watch(profilesDir, { recursive: true }, filterAndTrigger);
-        this.watchers.push(w);
+        this.trackWatcher(w);
         return;
       } catch {}
     }
@@ -370,7 +403,7 @@ export class CredentialWatcher {
         this.syncProfileSubdirWatchers(profilesDir, filterAndTrigger);
         filterAndTrigger(eventType, filename);
       });
-      this.watchers.push(parentWatcher);
+      this.trackWatcher(parentWatcher);
       this.syncProfileSubdirWatchers(profilesDir, filterAndTrigger);
     } catch (err) {
       console.warn('[Charlier] Could not attach fs.watch to profiles directory:', err);
@@ -391,6 +424,14 @@ export class CredentialWatcher {
         if (this.watchedProfileSubdirs.has(subPath)) continue;
         try {
           const subWatcher = fs.watch(subPath, handler);
+          subWatcher.on('error', () => {
+            try {
+              subWatcher.close();
+            } catch {}
+            if (this.watchedProfileSubdirs.get(subPath) === subWatcher) {
+              this.watchedProfileSubdirs.delete(subPath);
+            }
+          });
           this.watchedProfileSubdirs.set(subPath, subWatcher);
         } catch {}
       }

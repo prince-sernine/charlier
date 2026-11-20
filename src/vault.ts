@@ -7,7 +7,7 @@ import {
   getProfilesDir,
   getStateFilePath
 } from './constants';
-import { syncAntigravityCliHomeToVault } from './cli-isolation';
+import { resolveSafeProfileSubdir, syncAntigravityCliHomeToVault } from './cli-isolation';
 import {
   ProfileMetadata,
   CharlierState,
@@ -37,7 +37,15 @@ export class Vault {
   public ensureDirectories(): void {
     const profilesDir = getProfilesDir();
     if (!fs.existsSync(profilesDir)) {
-      fs.mkdirSync(profilesDir, { recursive: true });
+      fs.mkdirSync(profilesDir, { recursive: true, mode: 0o700 });
+    }
+  }
+
+  private getSafeProfileFolder(id: string): string | null {
+    try {
+      return resolveSafeProfileSubdir(getProfilesDir(), id);
+    } catch {
+      return null;
     }
   }
 
@@ -295,7 +303,9 @@ export class Vault {
   }
 
   public getProfile(id: string): ProfileMetadata | null {
-    const metaPath = path.join(getProfilesDir(), id, 'metadata.json');
+    const folder = this.getSafeProfileFolder(id);
+    if (!folder) return null;
+    const metaPath = path.join(folder, 'metadata.json');
     if (!fs.existsSync(metaPath)) {
       return null;
     }
@@ -326,7 +336,7 @@ export class Vault {
     const stateFile = getStateFilePath();
     const dir = path.dirname(stateFile);
     if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
+      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     }
     const lockPath = `${stateFile}.lock`;
     let lockFd: number | null = null;
@@ -410,9 +420,9 @@ export class Vault {
     const accountsPath = getActiveGoogleAccountsPath();
     const oauthPath = getActiveOAuthCredsPath();
 
-    const profileFolder = path.join(getProfilesDir(), id);
+    const profileFolder = resolveSafeProfileSubdir(getProfilesDir(), id);
     if (!fs.existsSync(profileFolder)) {
-      fs.mkdirSync(profileFolder, { recursive: true });
+      fs.mkdirSync(profileFolder, { recursive: true, mode: 0o700 });
     }
 
     const targetAccounts = path.join(profileFolder, 'google_accounts.json');
@@ -778,7 +788,7 @@ export class Vault {
     try {
       syncAntigravityCliHomeToVault(id);
     } catch {}
-    const profileFolder = path.join(getProfilesDir(), id);
+    const profileFolder = resolveSafeProfileSubdir(getProfilesDir(), id);
     const sourceAccounts = path.join(profileFolder, 'google_accounts.json');
     const sourceOAuth = path.join(profileFolder, 'oauth_creds.json');
     const sourceKeyring = path.join(profileFolder, 'keyring_credential.json');
@@ -839,7 +849,7 @@ export class Vault {
   }
 
   public deleteProfile(id: string): void {
-    const profileFolder = path.join(getProfilesDir(), id);
+    const profileFolder = resolveSafeProfileSubdir(getProfilesDir(), id);
     if (fs.existsSync(profileFolder)) {
       fs.rmSync(profileFolder, { recursive: true, force: true });
     }
@@ -859,7 +869,7 @@ export class Vault {
     if (!trimmed) {
       throw new Error('Profile name cannot be empty.');
     }
-    const metaPath = path.join(getProfilesDir(), id, 'metadata.json');
+    const metaPath = path.join(resolveSafeProfileSubdir(getProfilesDir(), id), 'metadata.json');
     if (!fs.existsSync(metaPath)) {
       throw new Error(`Profile "${id}" does not exist.`);
     }
@@ -890,7 +900,9 @@ export class Vault {
   }
 
   public updateProfileCachedQuota(id: string, cachedQuota: CachedQuotaMetric): void {
-    const metaPath = path.join(getProfilesDir(), id, 'metadata.json');
+    const folder = this.getSafeProfileFolder(id);
+    if (!folder) return;
+    const metaPath = path.join(folder, 'metadata.json');
     if (!fs.existsSync(metaPath)) return;
     try {
       const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8')) as ProfileMetadata;
@@ -914,7 +926,9 @@ export class Vault {
       authCheckedAt?: number;
     }
   ): boolean {
-    const metaPath = path.join(getProfilesDir(), id, 'metadata.json');
+    const folder = this.getSafeProfileFolder(id);
+    if (!folder) return false;
+    const metaPath = path.join(folder, 'metadata.json');
     if (!fs.existsSync(metaPath)) return false;
     try {
       const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8')) as ProfileMetadata;
@@ -1070,8 +1084,51 @@ export class Vault {
     return true;
   }
 
+  public getProfileAccessToken(id: string): { accessToken: string; expiryMs: number } | null {
+    const profileFolder = this.getSafeProfileFolder(id);
+    if (!profileFolder) return null;
+    const candidates: Array<{ accessToken: string; expiryMs: number }> = [];
+
+    const sourceKeyring = path.join(profileFolder, 'keyring_credential.json');
+    if (fs.existsSync(sourceKeyring)) {
+      try {
+        const parsed = JSON.parse(fs.readFileSync(sourceKeyring, 'utf8'));
+        const tok = parsed?.token;
+        if (typeof tok?.access_token === 'string' && tok.access_token.trim()) {
+          let expiryMs = 0;
+          if (typeof tok.expiry === 'string') {
+            const ms = Date.parse(tok.expiry);
+            if (Number.isFinite(ms)) expiryMs = ms;
+          } else if (typeof tok.expiry === 'number' && Number.isFinite(tok.expiry)) {
+            expiryMs = tok.expiry;
+          }
+          candidates.push({ accessToken: tok.access_token.trim(), expiryMs });
+        }
+      } catch {}
+    }
+
+    const sourceOAuth = path.join(profileFolder, 'oauth_creds.json');
+    if (fs.existsSync(sourceOAuth)) {
+      try {
+        const parsed = JSON.parse(fs.readFileSync(sourceOAuth, 'utf8'));
+        if (typeof parsed?.access_token === 'string' && parsed.access_token.trim()) {
+          const expiryMs =
+            typeof parsed.expiry_date === 'number' && Number.isFinite(parsed.expiry_date)
+              ? parsed.expiry_date
+              : 0;
+          candidates.push({ accessToken: parsed.access_token.trim(), expiryMs });
+        }
+      } catch {}
+    }
+
+    if (candidates.length === 0) return null;
+    candidates.sort((a, b) => b.expiryMs - a.expiryMs);
+    return candidates[0];
+  }
+
   public getProfileRefreshToken(id: string): string | null {
-    const profileFolder = path.join(getProfilesDir(), id);
+    const profileFolder = this.getSafeProfileFolder(id);
+    if (!profileFolder) return null;
     const sourceKeyring = path.join(profileFolder, 'keyring_credential.json');
     const sourceOAuth = path.join(profileFolder, 'oauth_creds.json');
 
@@ -1097,8 +1154,8 @@ export class Vault {
   }
 
   public updateInactiveProfileToken(id: string, accessToken: string, expiresInSec: number): void {
-    const profileFolder = path.join(getProfilesDir(), id);
-    if (!fs.existsSync(profileFolder)) return;
+    const profileFolder = this.getSafeProfileFolder(id);
+    if (!profileFolder || !fs.existsSync(profileFolder)) return;
 
     const expiryMs = Date.now() + expiresInSec * 1000;
     const expiryIso = new Date(expiryMs).toISOString();

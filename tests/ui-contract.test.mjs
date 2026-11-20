@@ -2065,3 +2065,138 @@ test('UIController.handleSwitch routes Antigravity budget-exhausted safely to Ex
     vscode.env.appName = prevAppName;
   }
 });
+
+test('UIController hybrid auto-refresh: updates active Hero & CLI CLAIMED on focus/visibility/ticks, pauses unfocused, supports Wayland activity fallback, and guards providerAtStart', async () => {
+  let agyHeroPulls = 0;
+  let agyClaimedPulls = 0;
+  let agyStandbyPulls = 0;
+  let codexHeroPulls = 0;
+  let codexClaimedPulls = 0;
+  let codexStandbyPulls = 0;
+
+  let agyFetchedAt = 0;
+  let codexLastFetch = 0;
+  const renders = [];
+
+  const agyProfiles = [
+    { id: 'a1', name: 'Hero', email: 'a1@example.test', updatedAt: Date.now(), cachedQuota: { plan: 'PRO', gemini: '80%', claudeGpt: '80%', argon: '80%', updatedAt: Date.now() } },
+    { id: 'a2', name: 'CliAgy', email: 'a2@example.test', updatedAt: Date.now(), cachedQuota: { plan: 'PRO', gemini: '60%', claudeGpt: '60%', argon: '60%', updatedAt: Date.now() } }
+  ];
+  const codexProfiles = [
+    { id: 'c1', name: 'CodexHero', email: 'c1@example.test', accountId: 'acc-1', updatedAt: Date.now(), cachedQuota: { plan: 'PRO', codex5h: '90%', codex7d: '85%', updatedAt: Date.now() } },
+    { id: 'c2', name: 'CliCodex', email: 'c2@example.test', accountId: 'acc-2', updatedAt: Date.now(), cachedQuota: { plan: 'PLUS', codex5h: '50%', codex7d: '50%', updatedAt: Date.now() } }
+  ];
+
+  const controller = new UIController(
+    {
+      getState: () => ({ selectedProvider: 'antigravity', activeProfileId: 'a1', activeCodexProfileId: 'c1' }),
+      saveState: () => {},
+      setSelectedProvider: () => {},
+      setSelectedProviderForHost: () => {},
+      setActiveCodexProfileId: () => {},
+      listProfiles: () => agyProfiles,
+      getLiveSessionInfoAsync: async () => ({ email: 'a1@example.test', hasOAuthCreds: true, isExpired: false }),
+      updateProfileCachedQuota: () => {},
+      updateProfileAuthHealth: () => {}
+    },
+    {
+      getCachedSummary: () => (agyFetchedAt ? { email: 'a1@example.test', planTier: 'PRO', groups: [], fetchedAt: agyFetchedAt } : null),
+      getQuotaSummary: async () => {
+        agyHeroPulls++;
+        agyFetchedAt = Date.now();
+        return {
+          email: 'a1@example.test',
+          planTier: 'PRO',
+          groups: [{ displayName: 'Gemini', buckets: [{ remainingFraction: 0.7 }] }],
+          fetchedAt: agyFetchedAt
+        };
+      },
+      parseMetrics: () => ({ plan: 'PRO', gemini: '70%', claudeGpt: '70%', argon: '70%', updatedAt: Date.now() }),
+      refreshProfileIds: async (_profs, ids) => {
+        agyClaimedPulls += ids.size;
+        return ids.size;
+      },
+      refreshAllInactiveProfiles: async () => { agyStandbyPulls++; },
+      buildAccountsHoverTooltip: () => 'agy-hover'
+    },
+    {
+      listProfiles: () => codexProfiles,
+      getLiveSessionInfo: () => ({ email: 'c1@example.test', accountId: 'acc-1', hasOAuthCreds: true, authMode: 'chatgpt' }),
+      findMatchingProfile: () => codexProfiles[0]
+    },
+    {
+      getCachedSummary: () => null,
+      getCachedMetric: () => codexProfiles[0].cachedQuota,
+      getLastFetchTime: () => codexLastFetch,
+      getActiveQuotaSummary: async () => {
+        codexHeroPulls++;
+        codexLastFetch = Date.now();
+        return { summary: { email: 'c1@example.test', accountId: 'acc-1' }, metric: codexProfiles[0].cachedQuota };
+      },
+      refreshProfileIds: async (ids) => {
+        codexClaimedPulls += ids.size;
+        return ids.size;
+      },
+      refreshAllProfiles: async () => { codexStandbyPulls++; return 1; },
+      buildCodexHoverTooltip: () => 'codex-hover'
+    }
+  );
+  controller.attachSidebar({
+    render: (st) => renders.push(st.selectedProvider)
+  });
+
+  try {
+    await controller.update(false);
+    const baselineAgy = agyHeroPulls;
+
+    // Claim one standby profile on each provider
+    const fakeTermA = { name: 'Charlier · Antigravity' };
+    const fakeTermC = { name: 'Charlier · Codex' };
+    controller.claimedTerminals.set('antigravity:a2', { terminal: fakeTermA, provider: 'antigravity', profileId: 'a2', profileName: 'CliAgy' });
+    controller.claimedTerminals.set('codex:c2', { terminal: fakeTermC, provider: 'codex', profileId: 'c2', profileName: 'CliCodex' });
+
+    // Unfocused window pauses ambient auto-refresh tick
+    controller.handleWindowFocusChanged(false);
+    agyFetchedAt = Date.now() - 120_000;
+    await controller.runAutoRefreshTick();
+    assert.equal(agyHeroPulls, baselineAgy, 'unfocused ambient tick must pause cleanly');
+
+    // Wayland/macOS interaction fallback: user activity after blur resumes ambient tick
+    controller.lastBlurAt = Date.now() - 500;
+    controller.noteUserActivity();
+    await controller.runAutoRefreshTick();
+    assert.equal(agyHeroPulls, baselineAgy + 1, 'active Hero must refresh on focused/active tick');
+    assert.equal(agyClaimedPulls, 1, 'CLI CLAIMED Antigravity profile must refresh on active tick');
+    assert.equal(codexClaimedPulls, 1, 'CLI CLAIMED Codex profile must refresh on active tick');
+    assert.equal(agyStandbyPulls, 0, 'unclaimed standbys must wait for 5m standby tier');
+
+    // Cockpit reopen catch-up refreshes stale active Hero immediately
+    agyFetchedAt = Date.now() - 30_000;
+    controller.handleCockpitVisibilityChanged(true);
+    await new Promise((r) => setTimeout(r, 40));
+    assert.equal(agyHeroPulls, baselineAgy + 2, 'reopening Cockpit must refresh stale Hero');
+
+    // Focus regain catch-up refreshes stale active Codex Hero when on Codex deck
+    await controller.switchProvider('codex');
+    codexLastFetch = Date.now() - 30_000;
+    const baselineCodex = codexHeroPulls;
+    controller.handleWindowFocusChanged(true);
+    await new Promise((r) => setTimeout(r, 40));
+    assert.equal(codexHeroPulls, baselineCodex + 1, 'window focus regain must catch up stale active Codex Hero');
+
+    // Force standby tick refreshes unclaimed standby vaults cleanly
+    await controller.runAutoRefreshTick({ forceStandby: true });
+    assert.equal(agyStandbyPulls, 1);
+    assert.equal(codexStandbyPulls, 1);
+
+    // rateLimits/updated push triggers fast repaint with zero extra wham/usage calls
+    const beforePush = codexHeroPulls;
+    const beforeRenders = renders.length;
+    controller.handleProviderActivity('codex', 'rateLimits/updated');
+    await new Promise((r) => setTimeout(r, 90));
+    assert.equal(codexHeroPulls, beforePush);
+    assert.ok(renders.length > beforeRenders);
+  } finally {
+    controller.dispose();
+  }
+});

@@ -10,7 +10,10 @@ import {
   getCodexHomeDir,
   getCodexProfilesDir
 } from './constants';
-import { syncCodexCliHomeToVault } from './cli-isolation';
+import {
+  readCodexCliHomeAuthReadOnly,
+  syncCodexCliHomeToVault
+} from './cli-isolation';
 import { hasLinuxDbusSession } from './keyring';
 import {
   ActiveProviderId,
@@ -92,7 +95,8 @@ function isTerminalCodexError(statusCode?: number, code?: string, message?: stri
 
 function classifyCodexAuthFailure(
   whamErr: any,
-  refreshErr: any
+  refreshErr: any,
+  skipPlain401Revoke = false
 ): { authStatus: AuthHealthStatus; code?: string; message?: string } | null {
   const refreshStatus = refreshErr?.statusCode as number | undefined;
   const refreshCode = refreshErr?.code as string | undefined;
@@ -120,7 +124,7 @@ function classifyCodexAuthFailure(
     whamCodeLower === 'account_deactivated' ||
     whamCodeLower === 'workspace_deactivated' ||
     whamCodeLower === 'signed_out' ||
-    (whamStatus === 401 && !refreshErr)
+    (!skipPlain401Revoke && whamStatus === 401 && !refreshErr)
   ) {
     return {
       authStatus: 'revoked',
@@ -1050,7 +1054,9 @@ export class CodexQuotaService {
   private observedStdinProcs = new WeakSet<object>();
   private exitedProcs = new WeakSet<object>();
   private inFlightProfileRefresh = new Map<string, Promise<CachedQuotaMetric | null>>();
+  private inFlightOAuthRefresh = new Map<string, Promise<DecodedCodexAuth | null>>();
   private activityListeners = new Set<(event: string) => void>();
+  private rateLimitsUpdateListeners = new Set<(rateLimits: any) => void>();
   private processExitListeners = new Set<() => void>();
   private claimedProfileIdsProvider: (() => ReadonlySet<string>) | null = null;
   private activeAuthHealth: {
@@ -1074,6 +1080,13 @@ export class CodexQuotaService {
     };
   }
 
+  public onRateLimitsUpdated(listener: (rateLimits: any) => void): () => void {
+    this.rateLimitsUpdateListeners.add(listener);
+    return () => {
+      this.rateLimitsUpdateListeners.delete(listener);
+    };
+  }
+
   public onProcessExited(listener: () => void): () => void {
     this.processExitListeners.add(listener);
     return () => {
@@ -1083,7 +1096,12 @@ export class CodexQuotaService {
 
   public dispose(): void {
     this.activityListeners.clear();
+    this.rateLimitsUpdateListeners.clear();
     this.processExitListeners.clear();
+  }
+
+  public getLastFetchTime(): number {
+    return this.lastFetchTime;
   }
 
   public getActiveAuthHealth(
@@ -1156,7 +1174,10 @@ export class CodexQuotaService {
     if (!this.observedStdoutProcs.has(proc)) {
       this.observedStdoutProcs.add(proc);
       try {
+        let exited = false;
         const markExited = () => {
+          if (exited) return;
+          exited = true;
           this.exitedProcs.add(proc);
           for (const cb of this.processExitListeners) {
             try { cb(); } catch {}
@@ -1169,26 +1190,53 @@ export class CodexQuotaService {
           const text =
             partialLine +
             (typeof chunk === 'string' ? chunk : chunk.toString('utf8'));
-          const lastNewline = text.lastIndexOf('\n');
-          if (lastNewline >= 0) {
-            partialLine = text.slice(lastNewline + 1);
-          } else {
-            partialLine = text.slice(-512);
+          const lines = text.split('\n');
+          partialLine = lines.pop() ?? '';
+          if (partialLine.length > 65536) {
+            partialLine = partialLine.slice(-4096);
           }
-          if (text.includes('"account/login/completed"')) {
-            this.lastNativeLoginAt = Date.now();
-            for (const listener of this.activityListeners) {
-              try { listener('account/login/completed'); } catch {}
+          for (const rawLine of lines) {
+            const line = rawLine.trim();
+            if (!line) continue;
+            if (line.includes('"account/login/completed"')) {
+              this.lastNativeLoginAt = Date.now();
+              for (const listener of this.activityListeners) {
+                try { listener('account/login/completed'); } catch {}
+              }
             }
-          }
-          if (
-            !text.includes('"id":"charlier-') &&
-            (text.includes('"method":"turn/started"') ||
-              text.includes('"method":"thread/started"') ||
-              text.includes('"method":"thread/resumed"'))
-          ) {
-            for (const listener of this.activityListeners) {
-              try { listener('turn/started'); } catch {}
+            if (line.includes('"account/rateLimits/updated"')) {
+              try {
+                const parsed = JSON.parse(line);
+                if (parsed?.method === 'account/rateLimits/updated' && parsed?.params) {
+                  const rl = parsed.params.rateLimits ?? parsed.params;
+                  if (rl && typeof rl === 'object') {
+                    for (const rlListener of this.rateLimitsUpdateListeners) {
+                      try { rlListener(rl); } catch {}
+                    }
+                  }
+                }
+              } catch {}
+              for (const listener of this.activityListeners) {
+                try { listener('rateLimits/updated'); } catch {}
+              }
+            }
+            if (
+              !line.includes('"id":"charlier-') &&
+              line.includes('"method":"turn/completed"')
+            ) {
+              for (const listener of this.activityListeners) {
+                try { listener('turn/completed'); } catch {}
+              }
+            }
+            if (
+              !line.includes('"id":"charlier-') &&
+              (line.includes('"method":"turn/started"') ||
+                line.includes('"method":"thread/started"') ||
+                line.includes('"method":"thread/resumed"'))
+            ) {
+              for (const listener of this.activityListeners) {
+                try { listener('turn/started'); } catch {}
+              }
             }
           }
         });
@@ -1210,24 +1258,29 @@ export class CodexQuotaService {
                   : '';
             if (rawStr) {
               const combined = partialOut + rawStr;
-              const nl = combined.lastIndexOf('\n');
-              partialOut = nl >= 0 ? combined.slice(nl + 1) : combined.slice(-512);
+              const lines = combined.split('\n');
+              partialOut = lines.pop() ?? '';
+              if (partialOut.length > 65536) {
+                partialOut = partialOut.slice(-4096);
+              }
               const pastWarmup = Date.now() - attachedAt > 1200;
-              if (
-                !combined.includes('"id":"charlier-') &&
-                (combined.includes('"method":"turn/start"') ||
-                  combined.includes('"method":"turn/steer"') ||
-                  combined.includes('"method":"turn/interrupt"') ||
-                  combined.includes('"method":"turn/addUserMessage"') ||
-                  combined.includes('"method":"thread/resume"') ||
-                  combined.includes('"method":"thread/start"') ||
-                  combined.includes('"method":"thread/approveGuardianDeniedAction"') ||
-                  combined.includes('"method":"thread/readState/update"') ||
-                  combined.includes('"method":"review/start"') ||
-                  (pastWarmup && combined.includes('"method":"thread/read"')))
-              ) {
-                for (const listener of this.activityListeners) {
-                  try { listener('turn/started'); } catch {}
+              for (const line of lines) {
+                if (
+                  !line.includes('"id":"charlier-') &&
+                  (line.includes('"method":"turn/start"') ||
+                    line.includes('"method":"turn/steer"') ||
+                    line.includes('"method":"turn/interrupt"') ||
+                    line.includes('"method":"turn/addUserMessage"') ||
+                    line.includes('"method":"thread/resume"') ||
+                    line.includes('"method":"thread/start"') ||
+                    line.includes('"method":"thread/approveGuardianDeniedAction"') ||
+                    line.includes('"method":"thread/readState/update"') ||
+                    line.includes('"method":"review/start"') ||
+                    (pastWarmup && line.includes('"method":"thread/read"')))
+                ) {
+                  for (const listener of this.activityListeners) {
+                    try { listener('turn/started'); } catch {}
+                  }
                 }
               }
             }
@@ -1236,6 +1289,135 @@ export class CodexQuotaService {
         };
       } catch {}
     }
+  }
+
+  private hasLiveCodexChild(): boolean {
+    if (this.isProcAlive(this.graftedCurrentChild)) {
+      return true;
+    }
+    const getHandles = (process as any)._getActiveHandles;
+    if (typeof getHandles !== 'function') return false;
+    try {
+      const handles: any[] = getHandles.call(process) || [];
+      return handles.some((h) => h && this.isProcAlive(h) && isCodexAppServerProcess(h, false));
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Applies a live `account/rateLimits/updated` JSON-RPC push straight from `codex app-server`
+   * into the active cache and matching vault profile with zero extra HTTPS requests.
+   */
+  public applyLiveRateLimitsPush(
+    codexVault: CodexVault,
+    rateLimits: any
+  ): CachedQuotaMetric | null {
+    if (!rateLimits || typeof rateLimits !== 'object') return null;
+    const primary = rateLimits.primary || rateLimits.primary_window;
+    const secondary = rateLimits.secondary || rateLimits.secondary_window;
+    const primaryUsed = primary?.usedPercent ?? primary?.used_percent;
+    const secondaryUsed = secondary?.usedPercent ?? secondary?.used_percent;
+    const primaryRemPct = remainingFromUsedPercent(primaryUsed);
+    const secondaryRemPct = remainingFromUsedPercent(secondaryUsed);
+    if (primaryRemPct === null && secondaryRemPct === null) {
+      return null;
+    }
+
+    const decoded = codexVault.readDecodedActiveAuth();
+    if (!decoded || decoded.authMode === 'apikey') return null;
+
+    const toResetMs = (w: any): number | undefined => {
+      const raw = w?.resetsAt ?? w?.reset_at;
+      if (typeof raw !== 'number' || !Number.isFinite(raw) || raw <= 0) return undefined;
+      return raw > 1e12 ? raw : raw * 1000;
+    };
+    const toWindowMins = (w: any, fallback: number): number => {
+      if (typeof w?.windowDurationMins === 'number' && Number.isFinite(w.windowDurationMins)) {
+        return Math.round(w.windowDurationMins);
+      }
+      if (typeof w?.limit_window_seconds === 'number' && Number.isFinite(w.limit_window_seconds)) {
+        return Math.round(w.limit_window_seconds / 60);
+      }
+      return fallback;
+    };
+
+    const now = Date.now();
+    const activeProfile = codexVault.findMatchingProfile({
+      accountId: decoded.accountId,
+      email: decoded.email
+    });
+    const prev = this.cachedMetric || activeProfile?.cachedQuota || null;
+    const planTier = normalizeCodexPlanTier(
+      rateLimits.planType || rateLimits.plan_type || prev?.plan || decoded.planTier,
+      decoded.authMode
+    );
+
+    const primaryResetAtMs = toResetMs(primary) ?? prev?.codex5hResetAtMs;
+    const secondaryResetAtMs = toResetMs(secondary) ?? prev?.codex7dResetAtMs;
+    const primaryResetStr =
+      primaryRemPct !== null && primaryRemPct < 100 && primaryResetAtMs
+        ? formatSecondsCountdown((primaryResetAtMs - now) / 1000)
+        : '';
+    const secondaryResetStr =
+      secondaryRemPct !== null && secondaryRemPct < 100 && secondaryResetAtMs
+        ? formatSecondsCountdown((secondaryResetAtMs - now) / 1000)
+        : '';
+
+    const next5h = primaryRemPct !== null ? `${primaryRemPct}%` : prev?.codex5h || '--';
+    const next7d = secondaryRemPct !== null ? `${secondaryRemPct}%` : prev?.codex7d || '--';
+    const creditsBalance =
+      rateLimits.credits?.hasCredits && rateLimits.credits?.balance
+        ? `$${rateLimits.credits.balance}`
+        : prev?.codexCreditsBalance;
+
+    const metric: CachedQuotaMetric = {
+      ...(prev || {}),
+      plan: planTier,
+      gemini: next5h,
+      claudeGpt: next7d,
+      argon: prev?.argon || '--',
+      codex5h: next5h,
+      codex5hReset: primaryResetStr || undefined,
+      codex5hResetAtMs: primaryResetAtMs,
+      codex5hWindowMins: toWindowMins(primary, prev?.codex5hWindowMins || 300),
+      codex7d: next7d,
+      codex7dReset: secondaryResetStr || undefined,
+      codex7dResetAtMs: secondaryResetAtMs,
+      codex7dWindowMins: toWindowMins(secondary, prev?.codex7dWindowMins || 10080),
+      ...(creditsBalance ? { codexCreditsBalance: creditsBalance } : {}),
+      updatedAt: now
+    };
+
+    const accountKey = decoded.accountId || decoded.email?.toLowerCase() || '';
+    this.cachedMetric = metric;
+    this.lastFetchTime = now;
+    this.activeAuthHealth = {
+      accountKey,
+      authStatus: 'ok',
+      checkedAt: now
+    };
+    if (this.cachedSummary) {
+      this.cachedSummary = {
+        ...this.cachedSummary,
+        email: decoded.email || this.cachedSummary.email,
+        accountId: decoded.accountId || this.cachedSummary.accountId,
+        planTier,
+        tier: formatCodexTierLabel(planTier),
+        fetchedAt: now
+      };
+    }
+
+    if (activeProfile) {
+      codexVault.updateProfileCachedQuota(activeProfile.id, metric);
+      if (activeProfile.authStatus === 'revoked' || activeProfile.authStatus === 'expired') {
+        codexVault.updateProfileAuthHealth(activeProfile.id, {
+          authStatus: 'ok',
+          authCheckedAt: now
+        });
+      }
+    }
+    return metric;
   }
 
   private isProcAlive(proc: any): boolean {
@@ -1643,7 +1825,8 @@ export class CodexQuotaService {
 
   /**
    * Refreshes a Codex profile's OAuth token via `POST https://auth.openai.com/oauth/token`
-   * respecting OpenAI's Single-Use Refresh Token Rotation (RTR).
+   * respecting OpenAI's Single-Use Refresh Token Rotation (RTR), serialized per account
+   * across concurrent active/profile refresh callers.
    */
   private async refreshCodexOAuthToken(
     rawAuthJson: any,
@@ -1653,6 +1836,64 @@ export class CodexQuotaService {
     const refreshToken = rawAuthJson?.tokens?.refresh_token;
     if (!refreshToken || typeof refreshToken !== 'string') {
       return null;
+    }
+
+    const decodedInput = parseCodexAuthObject(rawAuthJson);
+    const lockKey =
+      decodedInput?.accountId ||
+      decodedInput?.email?.toLowerCase() ||
+      profileDir ||
+      refreshToken;
+    const inFlight = this.inFlightOAuthRefresh.get(lockKey);
+    if (inFlight) {
+      return inFlight;
+    }
+
+    const run = this.executeCodexOAuthTokenRefresh(rawAuthJson, profileDir, isActiveOnDisk);
+    this.inFlightOAuthRefresh.set(lockKey, run);
+    try {
+      return await run;
+    } finally {
+      if (this.inFlightOAuthRefresh.get(lockKey) === run) {
+        this.inFlightOAuthRefresh.delete(lockKey);
+      }
+    }
+  }
+
+  private async executeCodexOAuthTokenRefresh(
+    rawAuthJson: any,
+    profileDir?: string,
+    isActiveOnDisk?: boolean
+  ): Promise<DecodedCodexAuth | null> {
+    const refreshToken = rawAuthJson?.tokens?.refresh_token;
+    if (!refreshToken || typeof refreshToken !== 'string') {
+      return null;
+    }
+
+    // Before consuming a single-use RTR refresh token, check if codex app-server already
+    // rotated ~/.codex/auth.json on disk for this exact account.
+    if (isActiveOnDisk) {
+      try {
+        const livePath = getActiveCodexAuthPath();
+        const targetDecoded = parseCodexAuthObject(rawAuthJson);
+        if (targetDecoded && fs.existsSync(livePath)) {
+          const liveNow = parseCodexAuthObject(JSON.parse(fs.readFileSync(livePath, 'utf8')));
+          const sameAccount = Boolean(
+            liveNow &&
+              ((targetDecoded.accountId && liveNow.accountId === targetDecoded.accountId) ||
+                (!targetDecoded.accountId &&
+                  targetDecoded.email &&
+                  liveNow.email?.toLowerCase() === targetDecoded.email.toLowerCase()))
+          );
+          if (
+            sameAccount &&
+            liveNow?.accessToken &&
+            liveNow.accessToken !== targetDecoded.accessToken
+          ) {
+            return liveNow;
+          }
+        }
+      } catch {}
     }
 
     const postBody = JSON.stringify({
@@ -2083,9 +2324,11 @@ export class CodexQuotaService {
       );
 
       try {
-        // Proactive 5-minute expiry check before hitting wham/usage
+        // Proactive 5-minute expiry check before hitting wham/usage (skip when claimed or
+        // when a live codex app-server owns active token rotation on disk).
         if (
           !isClaimed &&
+          !this.hasLiveCodexChild() &&
           decoded.tokenExpiryDate &&
           decoded.tokenExpiryDate <= Date.now() + 300_000 &&
           decoded.refreshToken
@@ -2173,7 +2416,7 @@ export class CodexQuotaService {
 
         return { summary, metric };
       } catch (err: any) {
-        const failure = classifyCodexAuthFailure(err?.whamErr || err, err?.refreshErr);
+        const failure = classifyCodexAuthFailure(err?.whamErr || err, err?.refreshErr, isClaimed);
         if (failure) {
           this.activeAuthHealth = {
             accountKey,
@@ -2243,6 +2486,22 @@ export class CodexQuotaService {
         const activeDecoded = codexVault.readDecodedActiveAuth();
         let rawAuth = JSON.parse(fs.readFileSync(authPath, 'utf8'));
         let decoded = parseCodexAuthObject(rawAuth);
+        if (isClaimed) {
+          // Read isolated CLI home auth.json strictly read-only so live CLI-rotated access tokens
+          // power wham/usage queries without writing or colliding with single-use RTR.
+          const cliRo = readCodexCliHomeAuthReadOnly(profileId);
+          if (cliRo?.rawAuthJson) {
+            const cliDecoded = parseCodexAuthObject(cliRo.rawAuthJson);
+            const vaultFreshness =
+              typeof rawAuth?.last_refresh === 'string'
+                ? Date.parse(rawAuth.last_refresh) || 0
+                : decoded?.tokenExpiryDate || 0;
+            if (cliDecoded?.accessToken && (!decoded || cliRo.freshnessMs >= vaultFreshness)) {
+              rawAuth = cliRo.rawAuthJson;
+              decoded = cliDecoded;
+            }
+          }
+        }
         if (!decoded || decoded.authMode === 'apikey' || !decoded.accessToken) {
           return null;
         }
@@ -2263,6 +2522,7 @@ export class CodexQuotaService {
 
         if (
           !isClaimed &&
+          !(isActiveOnDisk && this.hasLiveCodexChild()) &&
           decoded.tokenExpiryDate &&
           decoded.tokenExpiryDate <= Date.now() + 300_000 &&
           decoded.refreshToken
@@ -2361,7 +2621,7 @@ export class CodexQuotaService {
         }
         return metric;
       } catch (err: any) {
-        const failure = classifyCodexAuthFailure(err?.whamErr || err, err?.refreshErr);
+        const failure = classifyCodexAuthFailure(err?.whamErr || err, err?.refreshErr, isClaimed);
         if (failure) {
           codexVault.updateProfileAuthHealth(profileId, {
             authStatus: failure.authStatus,
@@ -2421,6 +2681,21 @@ export class CodexQuotaService {
         activeHealth?.authStatus === 'revoked' ||
         activeHealth?.authStatus === 'expired'
     );
+  }
+
+  public async refreshProfileIds(
+    profileIds: ReadonlySet<string>,
+    codexVault: CodexVault
+  ): Promise<number> {
+    if (!profileIds.size) return 0;
+    const profiles = codexVault
+      .listProfiles()
+      .filter((p) => profileIds.has(p.id) && p.authMode !== 'apikey');
+    if (profiles.length === 0) return 0;
+    const results = await Promise.allSettled(
+      profiles.map((p) => this.refreshProfileQuota(p.id, codexVault))
+    );
+    return results.filter((r) => r.status === 'fulfilled' && r.value).length;
   }
 
   public async refreshAllProfiles(codexVault: CodexVault): Promise<number> {

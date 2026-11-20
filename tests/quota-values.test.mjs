@@ -1324,3 +1324,227 @@ test('resolveBestStandbyProfile applies Healthy-Tier Bands and primary-pool bott
     provider: 'codex', profiles: [cAct, cPro20, cFree100], activeProfileId: 'ca', activeMinPct: 5, activeNeedsAction: false
   })?.profile.id, 'cp20');
 });
+
+test('Codex attachStdoutObserver parses live account/rateLimits/updated, emits turn/completed, dedupes partial chunks & exit+close, and serializes concurrent RTR refreshes + CLI CLAIMED read-only reads', async () => {
+  const fs = nodeRequire('fs');
+  const os = nodeRequire('os');
+  const path = nodeRequire('path');
+  const { EventEmitter } = nodeRequire('events');
+
+  const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'charlier-codex-live-'));
+  const prevHome = process.env.HOME;
+  const prevUserProfile = process.env.USERPROFILE;
+  const prevCodexHome = process.env.CODEX_HOME;
+  process.env.HOME = tmpHome;
+  process.env.USERPROFILE = tmpHome;
+  delete process.env.CODEX_HOME;
+
+  const makeJwt = (email, accountId, expSec) => {
+    const h = Buffer.from(JSON.stringify({ alg: 'none', typ: 'JWT' })).toString('base64url');
+    const p = Buffer.from(JSON.stringify({
+      email,
+      exp: expSec,
+      'https://api.openai.com/auth': { chatgpt_account_id: accountId, chatgpt_plan_type: 'pro' }
+    })).toString('base64url');
+    return `${h}.${p}.sig`;
+  };
+
+  let oauthCalls = 0;
+  let whamTokensSeen = [];
+  let force401 = false;
+  const mockHttps = {
+    request: (opts, cb) => {
+      const req = new EventEmitter();
+      req.write = () => {};
+      req.destroy = () => {};
+      req.end = () => {
+        const res = new EventEmitter();
+        if (String(opts.hostname).includes('auth.openai.com')) {
+          oauthCalls++;
+          setTimeout(() => {
+            res.statusCode = 200;
+            cb(res);
+            res.emit('data', JSON.stringify({
+              access_token: makeJwt('rtr@example.test', 'acc-rtr', Math.floor(Date.now() / 1000) + 3600),
+              refresh_token: 'rt-rotated-once'
+            }));
+            res.emit('end');
+          }, 25);
+        } else {
+          whamTokensSeen.push(opts.headers?.Authorization || '');
+          res.statusCode = force401 ? 401 : 200;
+          cb(res);
+          res.emit('data', force401
+            ? JSON.stringify({ error: { code: 'token_expired', message: 'Access token expired' } })
+            : JSON.stringify({
+                plan_type: 'pro',
+                rate_limit: {
+                  primary_window: { used_percent: 30, reset_after_seconds: 1800, limit_window_seconds: 18000 },
+                  secondary_window: { used_percent: 12, reset_after_seconds: 86400, limit_window_seconds: 604800 }
+                }
+              }));
+          res.emit('end');
+        }
+      };
+      return req;
+    }
+  };
+
+  try {
+    const codexMod = await loadSource('src/codex.ts', { https: mockHttps });
+    const codexDir = path.join(tmpHome, '.codex');
+    fs.mkdirSync(codexDir, { recursive: true });
+    const expJwt = makeJwt('rtr@example.test', 'acc-rtr', Math.floor(Date.now() / 1000) + 30);
+    const activeAuth = {
+      last_refresh: '2026-11-20T00:00:00.000Z',
+      tokens: { access_token: expJwt, refresh_token: 'rt-initial', id_token: expJwt, account_id: 'acc-rtr' }
+    };
+    fs.writeFileSync(path.join(codexDir, 'auth.json'), JSON.stringify(activeAuth, null, 2));
+
+    const vault = new codexMod.CodexVault();
+    const prof = vault.autoSaveUnsavedActiveSession();
+    assert.ok(prof);
+
+    const svc = new codexMod.CodexQuotaService();
+    const events = [];
+    const rlPushes = [];
+    let exitCount = 0;
+    svc.onActivity((e) => events.push(e));
+    svc.onRateLimitsUpdated((rl) => rlPushes.push(rl));
+    svc.onProcessExited(() => exitCount++);
+
+    // 1. Partial chunks do not duplicate turn/started; rateLimits/updated & turn/completed parse cleanly; exit+close fires once
+    const fakeProc = new EventEmitter();
+    fakeProc.stdout = new EventEmitter();
+    fakeProc.stdin = { write: () => true };
+    fakeProc.exitCode = null;
+    fakeProc.signalCode = null;
+    fakeProc.killed = false;
+    svc.attachStdoutObserver(fakeProc);
+
+    fakeProc.stdout.emit('data', '{"method":"turn/started","params":{');
+    fakeProc.stdout.emit('data', '"id":"1"}}\n');
+    fakeProc.stdout.emit('data', JSON.stringify({
+      method: 'account/rateLimits/updated',
+      params: {
+        rateLimits: {
+          planType: 'pro',
+          primary: { usedPercent: 42, windowDurationMins: 300, resetsAt: Math.floor(Date.now() / 1000) + 3600 },
+          secondary: { usedPercent: 20, windowDurationMins: 10080, resetsAt: Math.floor(Date.now() / 1000) + 86400 }
+        }
+      }
+    }) + '\n');
+    fakeProc.stdout.emit('data', '{"method":"turn/completed","params":{"threadId":"t1"}}\n');
+    fakeProc.emit('exit', 0);
+    fakeProc.emit('close', 0);
+
+    assert.equal(events.filter((e) => e === 'turn/started').length, 1);
+    assert.equal(events.filter((e) => e === 'turn/completed').length, 1);
+    assert.equal(events.filter((e) => e === 'rateLimits/updated').length, 1);
+    assert.equal(rlPushes.length, 1);
+    assert.equal(exitCount, 1, 'exit + close must notify processExitListeners only once');
+
+    const pushedMetric = svc.applyLiveRateLimitsPush(vault, rlPushes[0]);
+    assert.ok(pushedMetric);
+    assert.equal(pushedMetric.codex5h, '58%');
+    assert.equal(pushedMetric.codex7d, '80%');
+    assert.equal(vault.listProfiles().find((p) => p.id === prof.id)?.cachedQuota?.codex5h, '58%');
+
+    // 2. Concurrent getActiveQuotaSummary + refreshProfileQuota serialize OAuth RTR into ONE /oauth/token call
+    oauthCalls = 0;
+    svc.invalidateCache();
+    await Promise.all([
+      svc.getActiveQuotaSummary(vault, true),
+      svc.refreshProfileQuota(prof.id, vault, true)
+    ]);
+    assert.equal(oauthCalls, 1, 'concurrent active + profile refresh must serialize single-use RTR token rotation');
+
+    // 3. CLI CLAIMED profile reads fresher CLI home auth read-only & plain 401 never falsely marks revoked
+    const cliHomeDir = path.join(tmpHome, '.gemini', 'charlier', 'cli-homes', 'codex', prof.id);
+    fs.mkdirSync(cliHomeDir, { recursive: true });
+    const cliFreshJwt = makeJwt('rtr@example.test', 'acc-rtr', Math.floor(Date.now() / 1000) + 7200);
+    fs.writeFileSync(path.join(cliHomeDir, 'auth.json'), JSON.stringify({
+      last_refresh: '2026-11-21T00:00:00.000Z',
+      tokens: { access_token: cliFreshJwt, refresh_token: 'rt-cli-live', id_token: cliFreshJwt, account_id: 'acc-rtr' }
+    }));
+    fs.unlinkSync(path.join(codexDir, 'auth.json'));
+    whamTokensSeen = [];
+    svc.setClaimedProfileIdsProvider(() => new Set([prof.id]));
+    const claimedMetric = await svc.refreshProfileQuota(prof.id, vault, false);
+    assert.ok(claimedMetric);
+    assert.equal(claimedMetric.codex5h, '70%');
+    assert.ok(whamTokensSeen.some((h) => h.includes(cliFreshJwt)), 'must use fresher CLI home access_token read-only');
+
+    force401 = true;
+    await svc.refreshProfileQuota(prof.id, vault, false);
+    assert.notEqual(
+      vault.listProfiles().find((p) => p.id === prof.id)?.authStatus,
+      'revoked',
+      'plain 401 while refresh skipped for CLI CLAIMED must never falsely mark profile revoked'
+    );
+  } finally {
+    if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome;
+    if (prevUserProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = prevUserProfile;
+    if (prevCodexHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = prevCodexHome;
+    fs.rmSync(tmpHome, { recursive: true, force: true });
+  }
+});
+
+test('QuotaService preserves cached summary on transient empty daemon response and reuses unexpired access token in refreshInactiveProfile', async () => {
+  const svc = new quota.QuotaService();
+  const validSummary = {
+    email: 'hero@example.test',
+    tier: 'Pro Plan',
+    planTier: 'PRO',
+    groups: [{ displayName: 'Gemini', description: '', buckets: [{ bucketId: 'g', displayName: '5h', description: '', window: '5h', remainingFraction: 0.72 }] }],
+    hasArgonGroup: false,
+    fetchedAt: Date.now() - 20_000
+  };
+  svc.cachedSummary = validSummary;
+  svc.fetchFromDaemon = async () => ({
+    email: 'hero@example.test',
+    tier: 'Pro Plan',
+    planTier: 'PRO',
+    groups: [],
+    hasArgonGroup: false,
+    fetchedAt: Date.now()
+  });
+  const res = await svc.getQuotaSummary(true);
+  assert.equal(res?.groups?.length, 1, 'transient empty groups response must not poison cached quota summary');
+
+  // Unexpired access token reuse in refreshInactiveProfile avoids redundant OAuth minting
+  let mintCalls = 0;
+  let savedQuota = null;
+  svc.mintAccessTokenFromRefresh = async () => {
+    mintCalls++;
+    return { ok: true, access_token: 'minted-at', expires_in: 3600 };
+  };
+  svc.postCloudCodeJson = async (_at, ep) => {
+    if (ep.includes('loadCodeAssist')) return { status: 200, data: { paidTier: { id: 'g1-pro-tier' } } };
+    if (ep.includes('fetchAvailableModels')) return { status: 200, data: { models: { 'gemini-2.5-pro': { quotaInfo: { remainingFraction: 0.9 } } } } };
+    return { status: 200, data: { groups: [] } };
+  };
+  svc.getAICodeJson = async () => ({ status: 200, data: {} });
+  const fakeVault = {
+    getProfileAccessToken: () => ({ accessToken: 'cached-valid-at', expiryMs: Date.now() + 600_000 }),
+    getProfileRefreshToken: () => 'rt-unused',
+    updateInactiveProfileToken: () => {},
+    updateProfileAuthHealth: () => true,
+    updateProfileCachedQuota: (_id, m) => { savedQuota = m; }
+  };
+  const metric = await svc.refreshInactiveProfile(
+    {
+      id: 'standby-1',
+      name: 'Standby',
+      email: 's@example.test',
+      createdAt: 1,
+      updatedAt: 1,
+      cachedQuota: { plan: 'PRO', gemini: '10%', gemini7d: '10%', claudeGpt: '80%', argon: '80%', updatedAt: 1 }
+    },
+    fakeVault,
+    true
+  );
+  assert.equal(mintCalls, 0, 'unexpired cached access_token must skip redundant OAuth token mint');
+  assert.equal(metric?.gemini, '90%', 'un-resettable stale gemini7d without reset timestamp must not cap fresh gemini5h');
+  assert.equal(savedQuota?.gemini, '90%');
+});

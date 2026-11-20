@@ -177,6 +177,11 @@ function writeFileAtomic(filePath: string, data: string | Buffer, mode = 0o600):
       }
     }
     if (!renamed) {
+      try {
+        if (fs.lstatSync(filePath).isSymbolicLink()) {
+          fs.unlinkSync(filePath);
+        }
+      } catch {}
       fs.copyFileSync(tmpPath, filePath);
     }
     try {
@@ -409,7 +414,8 @@ function collectCodexExtensionBinDirs(
   home: string,
   platform: NodeJS.Platform,
   arch: string,
-  explicitExtPaths?: string[]
+  explicitExtPaths?: string[],
+  env: NodeJS.ProcessEnv = process.env
 ): string[] {
   const targetTriples: string[] = [];
   if (platform === 'win32') {
@@ -439,8 +445,9 @@ function collectCodexExtensionBinDirs(
     }
   }
 
+  const vscodeExtEnv = env.VSCODE_EXTENSIONS || process.env.VSCODE_EXTENSIONS;
   const ideExtParents = [
-    ...(process.env.VSCODE_EXTENSIONS ? [process.env.VSCODE_EXTENSIONS] : []),
+    ...(vscodeExtEnv ? [vscodeExtEnv] : []),
     path.join(home, '.vscode', 'extensions'),
     path.join(home, '.vscode-insiders', 'extensions'),
     path.join(home, '.vscode-server', 'extensions'),
@@ -560,7 +567,7 @@ export function resolveCliBinary(
 
   // 3. Extension-bundled binaries (e.g. `openai.chatgpt/bin/<os>-<arch>/codex`)
   if (binaryBase === 'codex') {
-    for (const extBinDir of collectCodexExtensionBinDirs(home, platform, arch, options?.extensionPaths)) {
+    for (const extBinDir of collectCodexExtensionBinDirs(home, platform, arch, options?.extensionPaths, env)) {
       const found = findBinInDir(extBinDir, binNames, platform);
       if (found) {
         return {
@@ -737,6 +744,63 @@ function healProfileAuthHealthAfterCliSync(profileDir: string): void {
       writeFileAtomic(metaPath, JSON.stringify(raw, null, 2), 0o600);
     }
   } catch {}
+}
+
+/**
+ * Reads the isolated CLI home's Codex `auth.json` strictly read-only (no vault or CLI writes)
+ * so live telemetry refreshes can use a CLI-rotated `access_token` while a `CLI CLAIMED`
+ * terminal is actively running without risking single-use RTR collisions.
+ */
+export function readCodexCliHomeAuthReadOnly(
+  profileId: string,
+  roots?: CliIsolationRoots
+): { rawAuthJson: any; freshnessMs: number } | null {
+  try {
+    const cliHome = getProfileCliHomeDir('codex', profileId, roots);
+    const cliAuthPath = path.join(cliHome, 'auth.json');
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const meta = readCodexAuthMeta(cliAuthPath);
+      if (meta) {
+        try {
+          const parsed = JSON.parse(meta.rawText);
+          return { rawAuthJson: parsed, freshnessMs: meta.freshnessMs };
+        } catch {
+          // Transient partial read while CLI writes; retry immediately
+        }
+      } else if (!fs.existsSync(cliAuthPath)) {
+        return null;
+      }
+    }
+  } catch {}
+  return null;
+}
+
+/**
+ * Reads an isolated Antigravity CLI home's OAuth token strictly read-only so live quota
+ * refreshes can reuse a fresh CLI-minted `access_token` without mutating active CLI files.
+ */
+export function readAntigravityCliHomeTokenReadOnly(
+  profileId: string,
+  roots?: CliIsolationRoots
+): { accessToken: string | null; refreshToken: string | null; expiryMs: number } | null {
+  try {
+    const cliHome = getProfileCliHomeDir('antigravity', profileId, roots);
+    const cliTokenPath = path.join(cliHome, '.gemini', 'antigravity-cli', 'antigravity-oauth-token');
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const meta = readAntigravityKeyringTokenMeta(cliTokenPath);
+      if (meta) {
+        return {
+          accessToken: meta.accessToken,
+          refreshToken: meta.refreshToken,
+          expiryMs: meta.expiryMs
+        };
+      }
+      if (!fs.existsSync(cliTokenPath)) {
+        return null;
+      }
+    }
+  } catch {}
+  return null;
 }
 
 export function syncCodexCliHomeToVault(

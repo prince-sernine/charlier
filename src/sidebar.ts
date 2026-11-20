@@ -56,6 +56,7 @@ export interface CockpitCallbacks {
   onRenameProfile: (provider: ActiveProviderId, profileId: string) => Promise<void>;
   onDeleteProfile: (provider: ActiveProviderId, profileId: string) => Promise<void>;
   onViewDetails?: (provider: ActiveProviderId, profileId: string) => Promise<void>;
+  onVisibilityChanged?: (visible: boolean) => void;
 }
 
 function escapeHtml(str: string | undefined | null): string {
@@ -216,10 +217,15 @@ export class CharlierSidebarProvider implements vscode.WebviewViewProvider {
   private lastNormalizedHtml?: string;
   private patchedSinceHtml = false;
   private hasPendingSync = false;
+  private renderSeq = 0;
   private readonly callbacks: CockpitCallbacks;
 
   constructor(callbacks: CockpitCallbacks) {
     this.callbacks = callbacks;
+  }
+
+  public isVisible(): boolean {
+    return Boolean(this.view?.visible);
   }
 
   public resolveWebviewView(
@@ -251,6 +257,9 @@ export class CharlierSidebarProvider implements vscode.WebviewViewProvider {
           webviewView.webview.html = this.buildHtml(this.lastState);
           this.lastNormalizedHtml = this.buildBodyHtml(this.lastState);
         }
+        try {
+          this.callbacks.onVisibilityChanged?.(Boolean(webviewView.visible));
+        } catch {}
       });
     }
 
@@ -261,6 +270,9 @@ export class CharlierSidebarProvider implements vscode.WebviewViewProvider {
           this.lastNormalizedHtml = undefined;
           this.patchedSinceHtml = false;
           this.hasPendingSync = false;
+          try {
+            this.callbacks.onVisibilityChanged?.(false);
+          } catch {}
         }
       });
     }
@@ -287,6 +299,9 @@ export class CharlierSidebarProvider implements vscode.WebviewViewProvider {
     if (this.lastState) {
       this.render(this.lastState);
     }
+    try {
+      this.callbacks.onVisibilityChanged?.(Boolean(webviewView.visible));
+    } catch {}
   }
 
   private async handleWebviewMessage(msg: any): Promise<void> {
@@ -354,6 +369,7 @@ export class CharlierSidebarProvider implements vscode.WebviewViewProvider {
       return;
     }
     this.lastNormalizedHtml = bodyHtml;
+    const seq = ++this.renderSeq;
     if (!this.view.webview.html) {
       this.patchedSinceHtml = false;
       this.hasPendingSync = false;
@@ -368,7 +384,7 @@ export class CharlierSidebarProvider implements vscode.WebviewViewProvider {
         })
       ).then(
         (delivered) => {
-          if (!this.view) return;
+          if (!this.view || seq !== this.renderSeq) return;
           if (delivered === true) {
             this.patchedSinceHtml = false;
             this.hasPendingSync = false;
@@ -388,7 +404,7 @@ export class CharlierSidebarProvider implements vscode.WebviewViewProvider {
           }
         },
         () => {
-          if (this.view) {
+          if (this.view && seq === this.renderSeq) {
             this.hasPendingSync = false;
             this.patchedSinceHtml = false;
             const latestState = this.lastState || state;

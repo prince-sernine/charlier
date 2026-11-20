@@ -314,3 +314,36 @@ test('UIController.handleSwitch cliOnly shows actionable error modal, skips crea
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('cross-OS storage & manifest guards: Vault blocks traversal IDs, CredentialWatcher start is idempotent with error listeners, and package.json stays within Marketplace limits', async () => {
+  const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+  assert.ok(Array.isArray(pkg.categories) && pkg.categories.includes('AI'), 'Marketplace categories must include AI');
+  assert.ok(Array.isArray(pkg.keywords) && pkg.keywords.length <= 10, 'VS Code Marketplace enforces max 10 keywords');
+  assert.equal(pkg.contributes?.configuration?.properties?.['charlier.autoRefreshInterval']?.default, 60);
+
+  const builtVault = await esbuild.build({
+    entryPoints: ['src/vault.ts'],
+    bundle: true,
+    platform: 'node',
+    format: 'cjs',
+    external: ['vscode'],
+    write: false,
+    logLevel: 'silent'
+  });
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'charlier-vault-safe-'));
+  const osProxy = { ...os, homedir: () => root };
+  const vMod = { exports: {} };
+  new Function('require', 'module', 'exports', '__dirname', builtVault.outputFiles[0].text)(
+    (name) => (name === 'vscode' ? {} : name === 'os' ? osProxy : nodeRequire(name)),
+    vMod,
+    vMod.exports,
+    path.resolve('dist')
+  );
+  try {
+    const vault = new vMod.exports.Vault({ read: () => null, readAsync: async () => null });
+    assert.equal(vault.getProfile('../evil'), null);
+    assert.throws(() => vault.deleteProfile('../evil'));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

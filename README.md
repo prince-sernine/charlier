@@ -6,7 +6,9 @@
 
 # Charlier
 
-**Multi-Account Vault, Surgical Hot-Swap & Live Quota Cockpit for Google Antigravity and OpenAI Codex**
+**Run multiple Codex & Antigravity CLI accounts at the exact same time. Hot-swap IDE accounts in `~100ms` without ever restarting the VS Code Extension Host.**
+
+*One pinned IDE Hero + unlimited parallel CLI accounts + live burn telemetry across Windows, macOS, and Linux. Zero runtime npm dependencies.*
 
 <p>
   <a href="#cross-os-architecture"><img src="https://img.shields.io/badge/Windows-DPAPI%20%2B%20WinCred%20N--API-0F2028?style=flat-square&logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0iIzg2RjY1QyI%2bPHBhdGggZD0iTTAgMGgxMS4zNzd2MTEuMzcySDB6bTEyLjYyMyAwSDI0djExLjM3MkgxMi42MjN6TTAgMTIuNjIzaDExLjM3N1YyNEgwem0xMi42MjMgMEgyNFYyNEgxMi42MjN6Ii8%2bPC9zdmc%2b" alt="Windows" height="26" /></a>
@@ -15,7 +17,7 @@
 </p>
 <p><sub>&middot;&nbsp;&nbsp;&nbsp;&middot;&nbsp;&nbsp;&nbsp;&middot;</sub></p>
 <p>
-  <img src="https://img.shields.io/badge/Charlier-v0.2.0-0B1119?style=flat-square&labelColor=131C26&color=86F65C" alt="Version 0.2.0" height="22" />
+  <img src="https://img.shields.io/badge/Charlier-v0.2.1-0B1119?style=flat-square&labelColor=131C26&color=86F65C" alt="Version 0.2.1" height="22" />
   <img src="https://img.shields.io/badge/Runtime%20Deps-0%20npm%20packages-0B1119?style=flat-square&labelColor=131C26&color=19B995" alt="Zero Dependencies" height="22" />
   <a href="https://marketplace.visualstudio.com/items?itemName=Sernine.charlier"><img src="https://img.shields.io/badge/VS%20Code-Marketplace-0B1119?style=flat-square&labelColor=131C26&color=8DBCF6&logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0iIzhEQkNGNiI%2bPHBhdGggZD0iTTIzLjE1IDIuNTg3TDE4LjIxLjIxYTEuNDk0IDEuNDk0IDAgMCAwLTEuNzA1LjI5bC05LjQ2IDguNjMtNC4xMi0zLjEyOGEuOTk5Ljk5OSAwIDAgMC0xLjI3Ni4wNTdMLjMyNyA3LjI2MUExIDEgMCAwIDAgLjMyNiA4Ljc0TDMuODk5IDEyIC4zMjYgMTUuMjZhMSAxIDAgMCAwIC4wMDEgMS40NzlMMS42NSAxNy45NGEuOTk5Ljk5OSAwIDAgMCAxLjI3Ni4wNTdsNC4xMi0zLjEyOCA5LjQ2IDguNjNhMS40OTIgMS40OTIgMCAwIDAgMS43MDQuMjlsNC45NDItMi4zNzdBMS41IDEuNSAwIDAgMCAyNCAxOS44OFY0LjEyYTEuNSAxLjUgMCAwIDAtLjg1LTEuNTMzem0tNS4xNDYgMTQuODYxTDEwLjgyNiAxMmw3LjE3OC01LjQ0OHYxMC44OTZ6Ii8%2bPC9zdmc%2b" alt="VS Code Marketplace" height="22" /></a>
   <a href="https://open-vsx.org/extension/Sernine/charlier"><img src="https://img.shields.io/badge/Open%20VSX-Registry-0B1119?style=flat-square&labelColor=131C26&color=92D6BE&logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0iIzkyRDZCRSI%2bPHBhdGggZD0iTTEyIDFMMiA2LjV2MTFMMTIgMjNsMTAtNS41di0xMUwxMiAxem0wIDIuMzFsNy41IDQuMTJMMTIgMTEuNTUgNC41IDcuNDMgMTIgMy4zMXpNNCA5LjQ0bDcgMy44NXY3LjRsLTctMy44NXYtNy40em05IDExLjI1di03LjRsNy0zLjg1djcuNGwtNyAzLjg1eiIvPjwvc3ZnPg==" alt="Open VSX" height="22" /></a>
@@ -30,14 +32,28 @@
 
 ---
 
-## Why This Exists
+## Cut One Card. Keep the Whole Table Running.
 
-Every existing account switcher for AI coding extensions breaks the moment you actually ship work in an IDE:
+Google Antigravity and OpenAI Codex were built assuming one login per machine. Every existing VS Code switcher just accepts that wall and throws a sledgehammer at your editor. Charlier broke both limits:
 
-- **Most switchers are slow, brittle, or half-wired**: They dump WebAssembly SQLite runtimes just to poke two keys, poll background loops until the editor stutters, or overwrite disk JSON blindly while leaving your OS keyring and running agent stuck on the previous login.
-- **Full-window reloads wreck your flow**: Reloading the Extension Host or editor window just to rotate accounts kills every language server, debugger, terminal task, and co-running assistant in the workspace.
-- **Charlier swaps only the provider you touched**: Whether you run both extensions inside **VS Code** or install **OpenAI Codex inside Antigravity IDE**, Charlier hot-swaps in place (`~100ms` in-memory `codex app-server` stdio graft with a 3-stage `account/updated` router reset on Codex; `~800ms` window-scoped language-server daemon respawn on Antigravity, with a `2`-in-`10m` surgical budget guard that escalates to a clean soft Extension Host restart before tripping upstream's 3-restart `process_exit_nonzero` limit) while sibling providers stay untouched. Cross-window file watchers propagate switches across every open editor window automatically.
-- **One IDE session + as many parallel terminal profiles as you want**: Keep Account A pinned in the IDE while spawning Profiles B, C, and D in dedicated terminal tabs via [Multi-Window & CLI Concurrency (`CLI Only` Mode)](#multi-window--cli-concurrency-cli-only-mode). One click launches `codex --no-daemon` or `agy` inside an isolated per-profile home (`~/.gemini/charlier/cli-homes/`) with zero collision against your IDE login.
+1. **Multi-Account CLI Concurrency (Supposed to Be Impossible)**: Normally, running two `codex` or `agy` accounts at the same time on one machine is impossible because both bind to a single global `~/.codex/auth.json`, `~/.gemini/`, and OS keyring entry. Charlier turns that into a single click: keep **Account A pinned in your IDE** while spawning **Accounts B, C, and D concurrently** in isolated integrated terminals via [`CLI Only` Mode](#multi-window--cli-concurrency-cli-only-mode). Each terminal boots in its own sandboxed home (`~/.gemini/charlier/cli-homes/`) with OS keyring bypass and automatic rotated-token sync-back. Zero collision.
+2. **Surgical Single-Provider Hot-Swap (Zero Extension Host Restart)**: Every other VS Code switcher calls `workbench.action.restartExtensionHost` or `reloadWindow` to apply an account change, nuking the entire extension rail: your language servers, debuggers, MCP servers, terminals, and every co-running AI assistant drop at once. Charlier never touches the rest of VS Code. It grafts only `codex app-server`'s `ChildProcess` stdio stream in memory (`~100ms` with a 3-stage `account/updated` router reset) or respawns only the current window's `agy` language-server PID (`~800ms`, protected by a `2`-in-`10m` surgical budget guard before upstream's 3-restart `process_exit_nonzero` wall). Only the single provider you clicked reloads. Everything else keeps running.
+3. **Sub-Second Speed & Live Burn Telemetry**: Swaps finish before your hand leaves the mouse (`~100ms` Codex / `~800ms` Antigravity), and the Cockpit + Status Bar stay live while you work: real-time `account/rateLimits/updated` + `turn/completed` push on Codex, post-turn loopback daemon sync on Antigravity, `60s` active + `CLI CLAIMED` burn ticks while focused, and `5m` standby vault pulls without ever hitting manual Reload.
+
+```text
+OTHER SWITCHERS (Nuke the Entire Extension Rail)
+  [Click Switch] ──> restartExtensionHost() / reloadWindow()
+                       ├── [X] Antigravity dropped
+                       ├── [X] Codex dropped
+                       ├── [X] Claude / Kimi / LSPs / Debuggers / MCP servers killed
+                       └── 3s-8s cold reboot  |  strictly 1 account at a time
+
+CHARLIER (Cut Only the Card You Touched, Run the Whole Deck)
+  [Click Switch] ──> Codex: ~100ms in-memory stdio graft  |  Antigravity: ~800ms local daemon respawn
+                       ├── IDE Hero swaps cleanly (sibling AI extensions & LSPs stay live)
+                       └── [CLI Only] ──> Terminal B (Account B) + Terminal C (Account C) + Terminal D (Account D)
+                                          all running in parallel inside isolated per-profile sandboxes
+```
 
 Named after the **Charlier pass**: the classic one-handed card cut that brings the bottom half of the deck cleanly to the top. Built under **Sernine**.
 
@@ -47,13 +63,13 @@ Named after the **Charlier pass**: the classic one-handed card cut that brings t
 
 | Capability | Charlier | Typical Account Switchers | Manual Sign-Out / Sign-In |
 | :--- | :--- | :--- | :--- |
-| **Single-Provider Surgical Reload** | **Yes** - swaps only the provider you clicked (with a 2-per-10m Antigravity crash-guard); sibling AI extensions stay live | **No** - restarts the entire VS Code Extension Host and drops running agents | Full browser OAuth roundtrip |
+| **Parallel CLI + IDE Accounts (`CLI Only`)** | **Yes** - run `codex --no-daemon` and `agy` on multiple accounts simultaneously while IDE Hero stays pinned | **No** - global single-account lock; clobbers IDE login or collides in OS keyring | Manual env juggling |
+| **Single-Provider Surgical Hot-Swap** | **Yes** - restarts ONLY the provider you clicked (`~100ms` stdio graft / `~800ms` window-scoped daemon respawn); sibling AI extensions, LSPs, and debuggers stay live | **No** - kills the entire VS Code Extension Host rail and drops every running agent | Full browser OAuth roundtrip |
 | **Switch Latency** | **`~100ms` (Codex) / `~800ms` (Antigravity)** | `3s-8s` full Extension Host or window reload | `30s-60s` browser login + callback |
-| **Parallel CLI + IDE (`CLI Only`)** | **Yes** - runs `codex --no-daemon` and `agy` in isolated per-profile homes while IDE stays pinned | **No** - clobbers the IDE account or collides in global stores | Manual env juggling |
-| **Standby Vault Telemetry** | **Yes** - direct HTTPS background pulls + clock reset healing (frozen on `RE-AUTH`) | **No** - only inspects the currently logged-in account | **No** |
-| **Revocation-Safe Swaps & Auto-Save** | **Yes** - never fires server-side `account/logout`; auto-saves unsaved IDE sessions before switch | **No** - often invalidates sibling sessions or overwrites active tokens | **No** |
+| **Live Burn Auto-Refresh & Standby Telemetry** | **Yes** - real-time turn push + `60s` focused active & `CLI CLAIMED` updates + `5m` direct HTTPS standby pulls + clock rollover | **No** - stale until manual reload, and blind to inactive accounts | **No** |
+| **Revocation-Safe Swaps & Auto-Save** | **Yes** - never fires server-side `account/logout`; auto-saves unsaved IDE sessions before switch; serialized Codex RTR lock | **No** - invalidates sibling sessions or burns single-use refresh tokens | **No** |
 | **Multi-Provider in One Vault** | **Google Antigravity + OpenAI Codex** *(Claude & Kimi co-run aware, full vaults on roadmap)* | Single provider only | Separate logins everywhere |
-| **Runtime Footprint & Win32 Security** | **0 npm deps**, no PowerShell spawns, no unsigned `.exe` droppers (**15 KB `#![no_std]` Rust N-API**) | Heavy SQLite WASM bundles, inline PowerShell scripts, or unsigned helpers | N/A |
+| **Runtime Footprint & Win32 Security** | **0 npm deps**, zero PowerShell spawns, zero unsigned `.exe` droppers (**15 KB `#![no_std]` Rust N-API**) | Heavy SQLite WASM bundles, inline PowerShell scripts, or unsigned helpers | N/A |
 
 ---
 
@@ -66,7 +82,7 @@ Named after the **Charlier pass**: the classic one-handed card cut that brings t
 - **CLI Claimed Visibility & Priority Sorting**: Profiles running in an isolated terminal via `CLI Only` surface across every view: a compact `>_` indicator (plus terminal count when multiple are open) on the Status Bar pill, a terminal marker and amber `CLI` pill in the Hover Matrix row, and `CLI CLAIMED` + `>_ Focus CLI` in the Cockpit. To stop active terminal sessions from getting buried behind idle high-tier standby accounts, Charlier overrides strict tier sort to pin the **Active** account first and float all **`CLI CLAIMED`** profiles right below it inside the Hover Matrix's 4-row cap (overflowing extra standby profiles cleanly to `+ N more in Cockpit`). Clicking a claimed row lets you focus its running terminal instead of spawning colliding duplicates.
 - **Best Standby Smart Failover (`NEXT UP`)**: When your active session drops into critical reserve (`< 15%`), exhausts a primary pool (e.g., `< 15%` Claude/GPT even while Gemini & Argon remain high), or requires **`RE-AUTH`** / **`VERIFY NEEDED`**, Charlier picks the strongest unclaimed healthy standby in memory (`< 0.1ms`) using **Healthy-Tier Bands**: healthy paid tiers win by plan rank first (e.g., `Ultra 50%` beats `Pro 100%`; Antigravity requires `Gemini >= 50%` and `Claude >= 25%`), low paid tiers (`15-49%`) yield to healthy paid tiers (`Pro 100%` beats `Ultra 20%`) while still beating `Free 100%`, and `Free`-only pools sort by max headroom. Surfaces a one-click **`⇄ Switch Best`** pit-stop banner + **`NEXT UP`** card badge in Cockpit, clickable **`Best Standby`** + **`NEXT`** pills in the Hover Matrix, and `$(zap) NEXT UP` in QuickPick.
 - **Plan-Tier Sorting, Inactive-Only Delete Guard & Keyboard Search**: Remaining standby profiles sort automatically by plan tier (`ULTRA > ENTERPRISE > PRO > TEAM > EDU > PLUS > API_KEY > FREE`), breaking ties by recency. Standby cards include collapsible `≡` accordion drawers for `5h`/`7d` reset countdowns, Code Review Pool (`Included` / `On demand` / live `%`), and `reset credits`, while active IDE Hero and `CLI CLAIMED` delete icons (`✕`) remain disabled with guidance tooltips to avoid post-delete re-detection loops. Once a deck reaches `6+` accounts, sticky search filters live (`/` focuses search, `Esc` clears).
-- **Zero-Flicker In-Place Updates & Retained Sync**: The Cockpit webview stays alive (`retainContextWhenHidden`) with automatic hidden-delivery sync recovery and `15s` per-provider freshness refreshes on deck flips. Deck flips (`Antigravity ⇄ Codex` via `◀` / `▶` in the Hover footer or `‹ Antigravity | Codex ›` in the Cockpit), tier switches, quota refreshes, new-account sign-ins, theme switches, and `CLI Only` claim updates reconcile smoothly in place without document teardown reloads, dial re-spins, `full -> empty -> full` oscillation, or idle lower-panel blinks.
+- **Live Burn Auto-Refresh & Zero-Flicker Retained Sync**: Watch what you burn in real time without touching **Refresh All** or reloading. Codex applies live `account/rateLimits/updated` pushes straight off `codex app-server` stdout at `0ms` (plus `turn/completed` fallback), Antigravity refreshes its local loopback daemon right after conversation activity settles, and a focus-aware tiered loop (`charlier.autoRefreshInterval`, default `60s`, paused when unfocused with automatic focus/Cockpit-open catch-up and Linux Wayland interaction liveness) keeps your **Active Hero** and running **`CLI CLAIMED`** terminals live every `60s` while refreshing unclaimed standby accounts gently every `5m` (reusing valid tokens and reading `CLI CLAIMED` Codex homes strictly read-only so single-use RTR never collides). The Cockpit webview stays alive (`retainContextWhenHidden`) with sequence-guarded `postMessage` sync recovery so deck flips, live burn ticks, tier changes, and `CLI Only` claim updates reconcile smoothly in place without document teardown reloads, dial re-spins, `full -> empty -> full` oscillation, or idle lower-panel blinks.
 
 ### 2. Revocation-Safe Swaps, Google Verification Gate & Honest `STALE` Telemetry
 - **Startup & Background OAuth Heartbeat**: On activation and refresh, Charlier validates both active and dormant credentials against Google Cloud Code (`oauth2.googleapis.com` / `v1internal`) and OpenAI Codex (`auth.openai.com/oauth/token` / `wham/usage`), deduplicating rapid probes and backing off failed attempts automatically.
@@ -172,6 +188,7 @@ All vault snapshots live locally under `~/.gemini/charlier/` using atomic `0o600
 | `charlier.showStatusBarQuota` | `true` | Display remaining capacity percentages inline inside the unified Status Bar pill. |
 | `charlier.autoRestartExtensionHost` | `true` | Soft-restart the Extension Host on switch when surgical reload is disabled or no sibling provider is active. |
 | `charlier.autoSwitchProvider` | `"auto"` | When focused, automatically flip the Status Bar pill and Cockpit when focusing Antigravity/Codex editors, tabs, turn streams, or CLI terminals (`"auto"` or `"off"`). |
+| `charlier.autoRefreshInterval` | `60` | Seconds between focused background quota ticks for the active Hero and `CLI CLAIMED` terminals (`30`-`3600`s; unclaimed standbys refresh at `5x` cadence, minimum `5m`; set `0` to disable periodic polling while keeping real-time turn push updates). |
 
 ### Themeable Status Bar Color Tokens
 
@@ -235,11 +252,11 @@ Optionally rebuild the Win32 Credential Manager N-API addon (requires Rust only 
 npm run build:wincred
 ```
 
-Install the generated `charlier-0.2.0.vsix` into VS Code or Antigravity IDE:
+Install the generated `charlier-0.2.1.vsix` into VS Code or Antigravity IDE:
 
 ```bash
-code --install-extension charlier-0.2.0.vsix --force
-antigravity-ide --install-extension charlier-0.2.0.vsix --force
+code --install-extension charlier-0.2.1.vsix --force
+antigravity-ide --install-extension charlier-0.2.1.vsix --force
 ```
 
 ---

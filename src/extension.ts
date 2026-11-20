@@ -195,14 +195,18 @@ export function activate(context: vscode.ExtensionContext): void {
   codexQuotaService.setClaimedProfileIdsProvider(
     () => uiController?.getClaimedProfileIds('codex') ?? new Set()
   );
+  quotaService.setClaimedProfileIdsProvider(
+    () => uiController?.getClaimedProfileIds('antigravity') ?? new Set()
+  );
 
   sidebarProvider = new CharlierSidebarProvider(
     uiController.getSidebarCallbacks()
   );
   uiController.attachSidebar(sidebarProvider);
 
-  // Initial UI render
+  // Initial UI render + tiered focus-aware live telemetry loop
   uiController.update().catch(() => {});
+  uiController.startAutoRefreshLoop();
 
   // Watcher automatically updates the status bar/cockpit, hot-swaps any local Codex app-server
   // if switched from another window, and probes if a new account logged in externally
@@ -325,7 +329,9 @@ export function activate(context: vscode.ExtensionContext): void {
           quotaService?.invalidate();
         }
         uiController?.scheduleUpdate(30, true);
-        if (!codexChanged && uiController?.getSelectedProvider() === 'antigravity') {
+        if (codexChanged && uiController?.getSelectedProvider() === 'codex') {
+          uiController?.scheduleUpdate(60, false);
+        } else if (!codexChanged && uiController?.getSelectedProvider() === 'antigravity') {
           uiController?.scheduleUpdate(60, false);
         }
         uiController?.checkForNewUnsavedAccount(
@@ -341,6 +347,7 @@ export function activate(context: vscode.ExtensionContext): void {
           return;
         }
         uiController?.handleFocusSignal('antigravity', 'stream');
+        uiController?.handleProviderActivity('antigravity', 'stream');
       }
     }
   );
@@ -393,8 +400,10 @@ export function activate(context: vscode.ExtensionContext): void {
   }
 
   // Check when window regains focus (e.g. returning from browser OAuth login),
-  // deduplicated by live auth fingerprint so unchanged Alt+Tabs cost zero daemon/UI work.
+  // deduplicated by live auth fingerprint so unchanged Alt+Tabs cost zero daemon/UI work
+  // while still letting the live telemetry controller catch up stale Hero/CLI meters.
   const windowFocusSub = vscode.window.onDidChangeWindowState((state) => {
+    uiController?.handleWindowFocusChanged(Boolean(state.focused));
     if (state.focused) {
       if (focusFollowUpTimer) clearTimeout(focusFollowUpTimer);
       if (focusSecondFollowUpTimer) clearTimeout(focusSecondFollowUpTimer);
@@ -436,7 +445,9 @@ export function activate(context: vscode.ExtensionContext): void {
           quotaService?.invalidate();
         }
         uiController?.scheduleUpdate(30, true);
-        if (!codexChanged && uiController?.getSelectedProvider() === 'antigravity') {
+        if (codexChanged && uiController?.getSelectedProvider() === 'codex') {
+          uiController?.scheduleUpdate(60, false);
+        } else if (!codexChanged && uiController?.getSelectedProvider() === 'antigravity') {
           uiController?.scheduleUpdate(60, false);
         }
         uiController?.checkForNewUnsavedAccount();
@@ -459,20 +470,47 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   });
 
-  // Zero-polling auto-switch listeners across extensions, webview tabs, and CLI terminals
+  // Zero-polling auto-switch listeners + real-time telemetry push hooks
   const focusAutoSwitchSubs: vscode.Disposable[] = [];
+  if (typeof codexQuotaService.onRateLimitsUpdated === 'function') {
+    const unsubRl = codexQuotaService.onRateLimitsUpdated((rateLimits) => {
+      if (!codexVaultInstance || !codexQuotaService) return;
+      const updated = codexQuotaService.applyLiveRateLimitsPush(codexVaultInstance, rateLimits);
+      if (updated) {
+        uiController?.handleProviderActivity('codex', 'rateLimits/updated');
+      }
+    });
+    focusAutoSwitchSubs.push({ dispose: () => unsubRl() });
+  }
   if (typeof codexQuotaService.onActivity === 'function') {
     const unsub = codexQuotaService.onActivity((evt) => {
       if (evt === 'account/login/completed') {
         uiController?.handleLoginCompleted('codex');
         uiController?.scheduleUpdate(80);
+      } else if (evt === 'turn/completed') {
+        uiController?.handleProviderActivity('codex', 'turn/completed');
+      } else if (evt === 'rateLimits/updated') {
+        return;
       }
       if (vscode.window.state?.focused === false) {
         return;
       }
+      uiController?.noteUserActivity();
       uiController?.handleFocusSignal('codex', 'stream');
     });
     focusAutoSwitchSubs.push({ dispose: () => unsub() });
+  }
+  if (typeof vscode.workspace?.onDidChangeConfiguration === 'function') {
+    focusAutoSwitchSubs.push(
+      vscode.workspace.onDidChangeConfiguration((e) => {
+        if (e.affectsConfiguration('charlier.autoRefreshInterval')) {
+          uiController?.reconfigureAutoRefresh();
+        }
+        if (e.affectsConfiguration('charlier.showStatusBarQuota')) {
+          uiController?.scheduleUpdate(30, true);
+        }
+      })
+    );
   }
   if (typeof codexQuotaService.onProcessExited === 'function') {
     const unsubExit = codexQuotaService.onProcessExited(() => {
@@ -534,6 +572,7 @@ export function activate(context: vscode.ExtensionContext): void {
   if (typeof vscode.window.onDidChangeActiveTextEditor === 'function') {
     focusAutoSwitchSubs.push(
       vscode.window.onDidChangeActiveTextEditor((editor) => {
+        uiController?.noteUserActivity();
         const uri = editor?.document?.uri;
         if (!uri) return;
         const provider = detectProviderFromUri(uri);
@@ -595,6 +634,7 @@ export function activate(context: vscode.ExtensionContext): void {
     focusAutoSwitchSubs.push(
       vscode.window.onDidChangeActiveTerminal((terminal) => {
         if (!terminal) return;
+        uiController?.noteUserActivity();
         if (Date.now() - lastClosedTerminalAt < 400) return;
         const mapped = terminalProviderMap.get(terminal);
         if (mapped) {

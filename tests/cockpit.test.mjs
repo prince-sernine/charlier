@@ -524,3 +524,50 @@ test('cockpit renders Best Standby pit-stop banner & NEXT UP tag on degraded her
   assert.match(css, /body\.vscode-high-contrast \.pitstop-banner/);
   assert.match(css, /body\.vscode-high-contrast \.nextup-tag/);
 });
+
+test('cockpit emits onVisibilityChanged and guards overlapping postMessage deliveries with renderSeq', async () => {
+  let visibilityCb;
+  let visible = true;
+  let currentHtml = '';
+  const visEvents = [];
+  const pendingPosts = [];
+  const view = {
+    get visible() { return visible; },
+    onDidChangeVisibility: (cb) => { visibilityCb = cb; return { dispose() {} }; },
+    webview: {
+      options: {},
+      get html() { return currentHtml; },
+      set html(v) { currentHtml = v; },
+      postMessage: (msg) => new Promise((resolve) => pendingPosts.push({ msg, resolve })),
+      onDidReceiveMessage: () => {}
+    }
+  };
+  const cockpit = new CharlierSidebarProvider({
+    onVisibilityChanged: (v) => visEvents.push(v)
+  });
+  cockpit.resolveWebviewView(view, {}, {});
+  assert.deepEqual(visEvents, [true]);
+
+  const s1 = state('antigravity', [profile('p1', 'antigravity')], 'p1', 'saved');
+  const s2 = state('codex', [profile('c1', 'codex')], 'c1', 'saved');
+  const s3 = state('antigravity', [profile('p1', 'antigravity'), profile('p2', 'antigravity')], 'p1', 'saved');
+
+  cockpit.render(s1);
+  cockpit.render(s2);
+  cockpit.render(s3);
+  assert.equal(pendingPosts.length, 2);
+
+  // Newer render resolves true FIRST, then stale older render resolves false -> must NOT clobber newer frame
+  const htmlBefore = currentHtml;
+  pendingPosts[1].resolve(true);
+  await new Promise((r) => setTimeout(r, 15));
+  pendingPosts[0].resolve(false);
+  await new Promise((r) => setTimeout(r, 15));
+  assert.equal(currentHtml, htmlBefore, 'stale postMessage rejection/false must not trigger full HTML rebuild over newer confirmed render');
+
+  visible = false;
+  visibilityCb();
+  visible = true;
+  visibilityCb();
+  assert.deepEqual(visEvents, [true, false, true]);
+});

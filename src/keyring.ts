@@ -321,6 +321,7 @@ export class KeyringManager {
             }
           );
           if (child.stdin) {
+            child.stdin.on('error', () => {});
             child.stdin.write(stdinCmd);
             child.stdin.end();
           }
@@ -341,6 +342,7 @@ export class KeyringManager {
             (error) => resolve(!error)
           );
           if (child.stdin) {
+            child.stdin.on('error', () => {});
             child.stdin.write(secret);
             child.stdin.end();
           }

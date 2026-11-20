@@ -16,12 +16,31 @@ export interface ProviderRuntimeDescriptor {
 let cachedDaemonAlive: { value: boolean; checkedAt: number } | null = null;
 const DAEMON_ALIVE_TTL_MS = 3000;
 
+function getHostScopedDaemonDirs(): string[] {
+  const allDirs = getDaemonSearchDirs();
+  const isAntigravityIdeHost = (vscode.env?.appName || '')
+    .toLowerCase()
+    .includes('antigravity');
+  const agConfig = vscode.workspace?.getConfiguration?.('antigravity');
+  const agServerArgs = agConfig?.get<string[]>('serverArgs', []);
+  const explicitIdeAppData =
+    Boolean(agConfig?.get<boolean>('isAntigravityIde', false)) ||
+    (Array.isArray(agServerArgs) &&
+      agServerArgs.some((arg) => String(arg || '').includes('antigravity-ide')));
+  if (isAntigravityIdeHost || explicitIdeAppData) {
+    return allDirs;
+  }
+  return allDirs.filter(
+    (dir) => path.basename(path.dirname(dir)).toLowerCase() !== 'antigravity-ide'
+  );
+}
+
 function hasAliveAntigravityDaemon(): boolean {
   const now = Date.now();
   if (cachedDaemonAlive && now - cachedDaemonAlive.checkedAt < DAEMON_ALIVE_TTL_MS) {
     return cachedDaemonAlive.value;
   }
-  const dirs = getDaemonSearchDirs();
+  const dirs = getHostScopedDaemonDirs();
   for (const dir of dirs) {
     if (!fs.existsSync(dir)) continue;
     try {
