@@ -2,7 +2,7 @@
   "name": "charlier",
   "displayName": "Charlier: Antigravity & Codex Account Switcher",
   "description": "Run multiple Antigravity & Codex CLI accounts in parallel and hot-swap IDE sessions in <100ms without restarting the VS Code Extension Host. Live quota cockpit, zero npm deps.",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "publisher": "Sernine",
   "license": "SEE LICENSE IN LICENSE",
   "repository": {

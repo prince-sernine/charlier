@@ -10,6 +10,7 @@ import {
 
 export interface AntigravityActivityInfo {
   dirKind: 'conversations' | 'annotations';
+  appDataDir?: 'antigravity' | 'antigravity-ide';
   conversationIds: string[];
 }
 
@@ -32,6 +33,7 @@ export class CredentialWatcher {
   private unmuteTimer: NodeJS.Timeout | null = null;
   private activityDebounceTimer: NodeJS.Timeout | null = null;
   private pendingActivityDirKind: 'conversations' | 'annotations' | null = null;
+  private pendingActivityAppDataDir: 'antigravity' | 'antigravity-ide' | undefined;
   private pendingActivityConvIds = new Set<string>();
   private pendingMutedEvent = false;
   private mutedUntil = 0;
@@ -222,7 +224,7 @@ export class CredentialWatcher {
         }
       }
 
-      for (const subName of ['antigravity', 'antigravity-ide']) {
+      for (const subName of ['antigravity', 'antigravity-ide'] as const) {
         const antigravityDir = path.join(geminiDir, subName);
         const attachAntigravitySubdir = () => {
           if (this.disposed || !fs.existsSync(antigravityDir)) return;
@@ -283,7 +285,7 @@ export class CredentialWatcher {
                       return;
                     }
                     const convId = name ? extractConversationIdFromFilename(name) : null;
-                    this.triggerActivityDebounced(activitySub, convId);
+                    this.triggerActivityDebounced(activitySub, subName, convId);
                   });
                   this.trackWatcher(aw);
                 } catch {}
@@ -475,12 +477,16 @@ export class CredentialWatcher {
 
   private triggerActivityDebounced(
     dirKind: 'conversations' | 'annotations',
+    appDataDir: 'antigravity' | 'antigravity-ide',
     conversationId: string | null
   ): void {
     if (this.disposed || !this.onAntigravityActivity) return;
     if (Date.now() - this.startedAt < 2000) return;
     if (dirKind === 'conversations' || !this.pendingActivityDirKind) {
       this.pendingActivityDirKind = dirKind;
+      this.pendingActivityAppDataDir = appDataDir;
+    } else if (!this.pendingActivityAppDataDir) {
+      this.pendingActivityAppDataDir = appDataDir;
     }
     if (conversationId) {
       this.pendingActivityConvIds.add(conversationId);
@@ -491,12 +497,15 @@ export class CredentialWatcher {
     this.activityDebounceTimer = setTimeout(() => {
       this.activityDebounceTimer = null;
       const batchKind = this.pendingActivityDirKind || dirKind;
+      const batchAppDataDir = this.pendingActivityAppDataDir || appDataDir;
       const batchIds = Array.from(this.pendingActivityConvIds);
       this.pendingActivityDirKind = null;
+      this.pendingActivityAppDataDir = undefined;
       this.pendingActivityConvIds.clear();
       if (this.disposed) return;
       this.onAntigravityActivity?.({
         dirKind: batchKind,
+        appDataDir: batchAppDataDir,
         conversationIds: batchIds
       });
     }, 35);

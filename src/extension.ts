@@ -282,19 +282,11 @@ export function activate(context: vscode.ExtensionContext): void {
 
   void refreshBaselineFingerprints();
 
-  const isAntigravityIdeHost = (vscode.env?.appName || '')
-    .toLowerCase()
-    .includes('antigravity');
-  const agConfig = vscode.workspace?.getConfiguration?.('antigravity');
-  const agServerArgs = agConfig?.get<string[]>('serverArgs', []);
-  const explicitIdeAppData =
-    Boolean(agConfig?.get<boolean>('isAntigravityIde', false)) ||
-    (Array.isArray(agServerArgs) &&
-      agServerArgs.some((arg) => String(arg || '').includes('antigravity-ide')));
-  const antigravityActivitySubdirs =
-    isAntigravityIdeHost || explicitIdeAppData
-      ? ['antigravity', 'antigravity-ide']
-      : ['antigravity'];
+  // Always watch both `antigravity` and `antigravity-ide` conversation dirs because
+  // `google.google-antigravity` in VS Code can run with `--app_data_dir=antigravity-ide`.
+  // `QuotaService.isAntigravityActivityOwnedByWindow` enforces strict per-window ownership
+  // and still drops `antigravity-ide` events in VS Code whenever this window owns no local hub.
+  const antigravityActivitySubdirs = ['antigravity', 'antigravity-ide'];
 
   watcher = new CredentialWatcher(
     () => {

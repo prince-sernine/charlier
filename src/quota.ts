@@ -241,6 +241,88 @@ export function renderCompactBar(percent: number, length = 5): string {
   return '▓'.repeat(filled) + '░'.repeat(empty);
 }
 
+const FIVE_HOUR_MAX_HORIZON_MS = 6 * 3600 * 1000;
+
+export function healExpiredAntigravityMetric(
+  metric: CachedQuotaMetric | null | undefined
+): CachedQuotaMetric | undefined {
+  if (!metric) return undefined;
+  const now = Date.now();
+  const healed: CachedQuotaMetric = { ...metric };
+  const isExpired = (iso?: string): boolean => {
+    if (!iso) return false;
+    const ms = Date.parse(iso);
+    return Number.isFinite(ms) && ms <= now;
+  };
+  const isBeyond5hHorizon = (iso?: string): boolean => {
+    if (!iso) return false;
+    const ms = Date.parse(iso);
+    return Number.isFinite(ms) && ms - now > FIVE_HOUR_MAX_HORIZON_MS;
+  };
+
+  if (isExpired(healed.gemini5hReset)) {
+    healed.gemini5h = '100%';
+    healed.gemini5hReset = undefined;
+  } else if (isBeyond5hHorizon(healed.gemini5hReset)) {
+    // Sanitize legacy snapshots where a 7d reset timestamp leaked into gemini5hReset
+    if (!healed.gemini7dReset) {
+      healed.gemini7dReset = healed.gemini5hReset;
+    }
+    healed.gemini5hReset = undefined;
+  }
+  if (isExpired(healed.gemini7dReset)) {
+    healed.gemini7d = '100%';
+    healed.gemini7dReset = undefined;
+  }
+  if (isExpired(healed.claude5hReset)) {
+    healed.claude5h = '100%';
+    healed.claude5hReset = undefined;
+  } else if (isBeyond5hHorizon(healed.claude5hReset)) {
+    healed.claude5hReset = undefined;
+  }
+  if (isExpired(healed.claude7dReset)) {
+    healed.claude7d = '100%';
+    healed.claude7dReset = undefined;
+  }
+  if (isExpired(healed.carbonReset)) {
+    healed.carbon = '100%';
+    healed.carbonReset = undefined;
+  }
+
+  const g5 = percentFromText(healed.gemini5h);
+  const g7 = percentFromText(healed.gemini7d);
+  if (g5 !== null || g7 !== null) {
+    const known = [g5, g7].filter((n): n is number => n !== null);
+    healed.gemini = `${Math.min(...known)}%`;
+    healed.geminiReset =
+      g5 !== null && (g7 === null || g5 < g7)
+        ? healed.gemini5hReset || healed.gemini7dReset
+        : healed.gemini7dReset || healed.gemini5hReset;
+  } else if (isExpired(healed.geminiReset)) {
+    healed.gemini = '100%';
+    healed.geminiReset = undefined;
+  }
+
+  const planUpper = String(healed.plan || '').toUpperCase();
+  if (planUpper !== 'FREE') {
+    const c5 = percentFromText(healed.claude5h);
+    const c7 = percentFromText(healed.claude7d);
+    if (c5 !== null || c7 !== null) {
+      const known = [c5, c7].filter((n): n is number => n !== null);
+      healed.claudeGpt = `${Math.min(...known)}%`;
+      healed.claudeReset =
+        c5 !== null && (c7 === null || c5 < c7)
+          ? healed.claude5hReset || healed.claude7dReset
+          : healed.claude7dReset || healed.claude5hReset;
+    } else if (isExpired(healed.claudeReset)) {
+      healed.claudeGpt = '100%';
+      healed.claudeReset = undefined;
+    }
+  }
+
+  return healed;
+}
+
 export function formatTimeAgo(timestamp?: number): string {
   if (!timestamp || !Number.isFinite(timestamp)) return 'never';
   const diff = Date.now() - timestamp;
@@ -592,6 +674,7 @@ export class QuotaService {
    */
   public async isAntigravityActivityOwnedByWindow(info?: {
     dirKind: 'conversations' | 'annotations';
+    appDataDir?: 'antigravity' | 'antigravity-ide';
     conversationIds: string[];
   }): Promise<boolean> {
     const dirKind = info?.dirKind || 'conversations';
@@ -602,9 +685,27 @@ export class QuotaService {
     const liveDaemons = this.findAllLiveDaemons();
     const localDaemon = this.findLocalWindowDaemon(liveDaemons);
 
+    const isAntigravityIdeHost = (vscode.env?.appName || '')
+      .toLowerCase()
+      .includes('antigravity');
+    const agConfig = vscode.workspace?.getConfiguration?.('antigravity');
+    const agServerArgs = agConfig?.get<string[]>('serverArgs', []);
+    const explicitIdeAppData =
+      Boolean(agConfig?.get<boolean>('isAntigravityIde', false)) ||
+      (Array.isArray(agServerArgs) &&
+        agServerArgs.some((arg) => String(arg || '').includes('antigravity-ide')));
+
     // No daemons running anywhere on disk (standalone CLI or unit harness):
-    // ignore annotations-only metadata noise, allow genuine conversation writes.
+    // ignore annotations-only metadata noise and keep standard VS Code isolated from
+    // `antigravity-ide/` unless configured or running inside Antigravity IDE.
     if (liveDaemons.length === 0 && !localDaemon) {
+      if (
+        info?.appDataDir === 'antigravity-ide' &&
+        !isAntigravityIdeHost &&
+        !explicitIdeAppData
+      ) {
+        return false;
+      }
       return dirKind === 'conversations';
     }
 
@@ -700,9 +801,6 @@ export class QuotaService {
     // Live Antigravity daemons exist on disk, but THIS Extension Host owns NONE of them.
     // In standard VS Code (`google.google-antigravity` spawns `agy` inside the Extension Host),
     // that proves the file write came from another window or CLI.
-    const isAntigravityIdeHost = (vscode.env?.appName || '')
-      .toLowerCase()
-      .includes('antigravity');
     if (!isAntigravityIdeHost) {
       return false;
     }
@@ -1311,7 +1409,10 @@ export class QuotaService {
       this.queryDaemonRpcWithMeta<any>(
         daemon,
         '/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary',
-        { force_refresh: forceRefresh }
+        // QuotaService already gates daemon calls with its own 15s TTL; always pass
+        // force_refresh: true when hitting `agy` so `agy` does not serve minutes-stale
+        // internal 5h/7d cache values.
+        { force_refresh: true }
       )
     ]);
 
@@ -1873,9 +1974,16 @@ export class QuotaService {
         profile.planOverride || fallbackCachedPlan
       );
 
-      // 1. Extract Gemini 5h pool from fetchAvailableModels & preserve/auto-heal 7d pool
-      let gemini5h = profile.cachedQuota?.gemini5h || profile.cachedQuota?.gemini || '--';
-      let gemini5hReset = profile.cachedQuota?.gemini5hReset || profile.cachedQuota?.geminiReset;
+      // 1. Heal any expired stored reset windows first, then extract Gemini quota from
+      // fetchAvailableModels. Google's fetchAvailableModels returns the tighter effective
+      // Gemini bucket (`min(5h, 7d)`) along with that tighter bucket's resetTime:
+      // - resetTime > 6h away => 7d weekly pool (do NOT overwrite gemini5h or stamp a 7d reset on 5h)
+      // - resetTime <= 6h away (or absent) => 5h fast pool
+      const healedCached = healExpiredAntigravityMetric(profile.cachedQuota);
+      let gemini5h = healedCached?.gemini5h || healedCached?.gemini || '--';
+      let gemini5hReset = healedCached?.gemini5hReset;
+      let gemini7dReset = healedCached?.gemini7dReset;
+      let gemini7d = gemini7dReset && healedCached?.gemini7d ? healedCached.gemini7d : '--';
 
       const modelsDict = modelsRes.data?.models;
       if (modelsDict && typeof modelsDict === 'object') {
@@ -1915,17 +2023,44 @@ export class QuotaService {
         const foundPct = foundQuota ? percentFromFraction(foundQuota.remainingFraction) : null;
         if (foundPct !== null) {
           const pct = foundPct;
-          gemini5h = `${pct}%`;
-          if (foundQuota.resetTime) {
-            gemini5hReset = String(foundQuota.resetTime);
+          const resetIso = foundQuota.resetTime ? String(foundQuota.resetTime) : undefined;
+          const resetMs = resetIso ? Date.parse(resetIso) : NaN;
+          const isWeeklyHorizon =
+            Number.isFinite(resetMs) && resetMs - Date.now() > FIVE_HOUR_MAX_HORIZON_MS;
+
+          if (isWeeklyHorizon) {
+            // Effective bucket is the 7-day weekly limit (tighter than 5h, or account is 100% full).
+            gemini7d = `${pct}%`;
+            gemini7dReset = resetIso;
+            if (pct === 100) {
+              gemini5h = '100%';
+              gemini5hReset = undefined;
+            } else {
+              // Preserve previously observed 5h bucket if it is still valid and >= weekly floor;
+              // never write a 7-day countdown onto gemini5hReset.
+              const prev5hPct = percentFromText(healedCached?.gemini5h);
+              if (prev5hPct !== null && prev5hPct >= pct) {
+                gemini5h = `${prev5hPct}%`;
+                gemini5hReset = healedCached?.gemini5hReset;
+              } else {
+                gemini5h = `${pct}%`;
+                gemini5hReset = undefined;
+              }
+            }
           } else {
-            gemini5hReset = undefined;
+            // Effective bucket is the 5-hour fast window.
+            gemini5h = `${pct}%`;
+            gemini5hReset = pct < 100 ? resetIso : undefined;
+            if (gemini7d === '--') {
+              gemini7d = gemini5h;
+            }
           }
         }
       }
 
-      let gemini7dReset = profile.cachedQuota?.gemini7dReset;
-      let gemini7d = gemini7dReset && profile.cachedQuota?.gemini7d ? profile.cachedQuota.gemini7d : gemini5h;
+      if (gemini7d === '--') {
+        gemini7d = gemini5h;
+      }
       if (this.isResetExpired(gemini7dReset)) {
         gemini7d = '100%';
         gemini7dReset = undefined;
@@ -1950,10 +2085,10 @@ export class QuotaService {
       }
 
       // 2. Extract Claude & GPT 5h + 7d pools (and optional Argon/Carbon groups) from retrieveUserQuotaSummary
-      let claude5h = profile.cachedQuota?.claude5h || '--';
-      let claude5hReset = profile.cachedQuota?.claude5hReset;
-      let claude7d = profile.cachedQuota?.claude7d || profile.cachedQuota?.claudeGpt || '--';
-      let claude7dReset = profile.cachedQuota?.claude7dReset || profile.cachedQuota?.claudeReset;
+      let claude5h = healedCached?.claude5h || '--';
+      let claude5hReset = healedCached?.claude5hReset;
+      let claude7d = healedCached?.claude7d || healedCached?.claudeGpt || '--';
+      let claude7dReset = healedCached?.claude7dReset || healedCached?.claudeReset;
       let claudeGpt = claude7d;
       let claudeReset = claude7dReset;
       let upstreamArgon: string | undefined;
@@ -2770,8 +2905,8 @@ export class QuotaService {
         const rWk = bWk?.resetTime ? this.formatResetCompact(bWk.resetTime) : '';
 
         let detailCell: string;
-        if (p5h !== null && pWk !== null && p5h < 100) {
-          detailCell = `5h: ${renderHoverPct(p5h, true, isLight, activeNeedsReauth)}${r5h ? ` *(${r5h})*` : ''} &nbsp;·&nbsp; 7d: ${renderHoverPct(pWk, true, isLight, activeNeedsReauth)}${rWk && pWk < 100 ? ` *(${rWk})*` : ''}`;
+        if (p5h !== null && pWk !== null) {
+          detailCell = `5h: ${renderHoverPct(p5h, true, isLight, activeNeedsReauth)}${r5h && p5h < 100 ? ` *(${r5h})*` : ''} &nbsp;·&nbsp; 7d: ${renderHoverPct(pWk, true, isLight, activeNeedsReauth)}${rWk && pWk < 100 ? ` *(${rWk})*` : ''}`;
         } else {
           const r =
             p5h !== null && (pWk === null || p5h < pWk)
@@ -2841,7 +2976,11 @@ export class QuotaService {
       }
       md.appendMarkdown(`\n`);
     } else if (activeProfile?.cachedQuota) {
-      const cq = activeProfile.cachedQuota;
+      const cq =
+        (activeNeedsReauth
+          ? activeProfile.cachedQuota
+          : healExpiredAntigravityMetric(activeProfile.cachedQuota)) ||
+        activeProfile.cachedQuota;
       const g5h = percentFromText(cq.gemini5h || cq.gemini);
       const gWk = percentFromText(cq.gemini7d || cq.gemini);
       const gMin = percentFromText(cq.gemini);
@@ -2869,18 +3008,31 @@ export class QuotaService {
       );
 
       if (planBadge !== 'FREE') {
+        const c5h = percentFromText(cq.claude5h);
+        const cWk = percentFromText(cq.claude7d || cq.claudeGpt);
         const cPct = percentFromText(cq.claudeGpt);
-        const cRst = (cq.claude7dReset || cq.claudeReset)
+        const c5hRst = cq.claude5hReset ? this.formatResetCompact(cq.claude5hReset) : '';
+        const cWkRst = (cq.claude7dReset || cq.claudeReset)
           ? this.formatResetCompact(cq.claude7dReset || cq.claudeReset)
           : '';
-        const cNote =
-          cPct === null
-            ? 'Usage unavailable'
-            : cPct === 0
-              ? `<span style="color:${pal.crimson};">**Depleted**</span>`
-              : 'Active reserve';
+        let cDetail: string;
+        if (c5h !== null && cWk !== null) {
+          cDetail = `5h: ${renderHoverPct(c5h, true, isLight, activeNeedsReauth)}${c5hRst && c5h < 100 ? ` *(${c5hRst})*` : ''} &nbsp;·&nbsp; 7d: ${renderHoverPct(cWk, true, isLight, activeNeedsReauth)}${cWkRst && cWk < 100 ? ` *(${cWkRst})*` : ''}`;
+        } else {
+          const cRst =
+            c5h !== null && (cWk === null || c5h < cWk)
+              ? c5hRst || cWkRst
+              : cWkRst || c5hRst;
+          const cNote =
+            cPct === null
+              ? 'Usage unavailable'
+              : cPct === 0
+                ? `<span style="color:${pal.crimson};">**Depleted**</span>`
+                : 'Active reserve';
+          cDetail = `${cNote}${cRst && cPct !== null && cPct < 100 ? ` &nbsp;·&nbsp; resets in **${cRst}**` : ''}`;
+        }
         md.appendMarkdown(
-          `| ${this.padTableCell('**Claude & GPT** *(Opus, Sonnet)*')} | ${this.padTableCell(renderHoverGaugeCell(cPct, true, isLight, activeNeedsReauth))} | ${this.padTableCell(`${cNote}${cRst && cPct !== null && cPct < 100 ? ` &nbsp;·&nbsp; resets in **${cRst}**` : ''}`)} |\n`
+          `| ${this.padTableCell('**Claude & GPT** *(Opus, Sonnet)*')} | ${this.padTableCell(renderHoverGaugeCell(cPct, true, isLight, activeNeedsReauth))} | ${this.padTableCell(cDetail)} |\n`
         );
         const cbPct =
           cq.carbon && cq.carbon !== 'incl.' ? percentFromText(cq.carbon) : null;
@@ -3078,7 +3230,9 @@ export class QuotaService {
         const rawMetrics =
           isActive && liveMetrics
             ? liveMetrics
-            : p.cachedQuota || {
+            : (pNeedsReauth
+                ? p.cachedQuota
+                : healExpiredAntigravityMetric(p.cachedQuota)) || {
                 plan: p.planOverride || 'FREE',
                 gemini: '--',
                 claudeGpt: '--',

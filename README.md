@@ -17,7 +17,7 @@
 </p>
 <p><sub>&middot;&nbsp;&nbsp;&nbsp;&middot;&nbsp;&nbsp;&nbsp;&middot;</sub></p>
 <p>
-  <img src="https://img.shields.io/badge/Charlier-v0.2.2-0B1119?style=flat-square&labelColor=131C26&color=86F65C" alt="Version 0.2.2" height="22" />
+  <img src="https://img.shields.io/badge/Charlier-v0.2.3-0B1119?style=flat-square&labelColor=131C26&color=86F65C" alt="Version 0.2.3" height="22" />
   <img src="https://img.shields.io/badge/Runtime%20Deps-0%20npm%20packages-0B1119?style=flat-square&labelColor=131C26&color=19B995" alt="Zero Dependencies" height="22" />
   <a href="https://marketplace.visualstudio.com/items?itemName=Sernine.charlier"><img src="https://img.shields.io/badge/VS%20Code-Marketplace-0B1119?style=flat-square&labelColor=131C26&color=8DBCF6&logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0iIzhEQkNGNiI%2bPHBhdGggZD0iTTIzLjE1IDIuNTg3TDE4LjIxLjIxYTEuNDk0IDEuNDk0IDAgMCAwLTEuNzA1LjI5bC05LjQ2IDguNjMtNC4xMi0zLjEyOGEuOTk5Ljk5OSAwIDAgMC0xLjI3Ni4wNTdMLjMyNyA3LjI2MUExIDEgMCAwIDAgLjMyNiA4Ljc0TDMuODk5IDEyIC4zMjYgMTUuMjZhMSAxIDAgMCAwIC4wMDEgMS40NzlMMS42NSAxNy45NGEuOTk5Ljk5OSAwIDAgMCAxLjI3Ni4wNTdsNC4xMi0zLjEyOCA5LjQ2IDguNjNhMS40OTIgMS40OTIgMCAwIDAgMS43MDQuMjlsNC45NDItMi4zNzdBMS41IDEuNSAwIDAgMCAyNCAxOS44OFY0LjEyYTEuNSAxLjUgMCAwIDAtLjg1LTEuNTMzem0tNS4xNDYgMTQuODYxTDEwLjgyNiAxMmw3LjE3OC01LjQ0OHYxMC44OTZ6Ii8%2bPC9zdmc%2b" alt="VS Code Marketplace" height="22" /></a>
   <a href="https://open-vsx.org/extension/Sernine/charlier"><img src="https://img.shields.io/badge/Open%20VSX-Registry-0B1119?style=flat-square&labelColor=131C26&color=92D6BE&logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0iIzkyRDZCRSI%2bPHBhdGggZD0iTTEyIDFMMiA2LjV2MTFMMTIgMjNsMTAtNS41di0xMUwxMiAxem0wIDIuMzFsNy41IDQuMTJMMTIgMTEuNTUgNC41IDcuNDMgMTIgMy4zMXpNNCA5LjQ0bDcgMy44NXY3LjRsLTctMy44NXYtNy40em05IDExLjI1di03LjRsNy0zLjg1djcuNGwtNyAzLjg1eiIvPjwvc3ZnPg==" alt="Open VSX" height="22" /></a>
@@ -261,11 +261,11 @@ Optionally rebuild the Win32 Credential Manager N-API addon (requires Rust only 
 npm run build:wincred
 ```
 
-Install the generated `charlier-0.2.2.vsix` into VS Code or Antigravity IDE:
+Install the generated `charlier-0.2.3.vsix` into VS Code or Antigravity IDE:
 
 ```bash
-code --install-extension charlier-0.2.2.vsix --force
-antigravity-ide --install-extension charlier-0.2.2.vsix --force
+code --install-extension charlier-0.2.3.vsix --force
+antigravity-ide --install-extension charlier-0.2.3.vsix --force
 ```
 
 ---

@@ -349,6 +349,8 @@ export function healExpiredCodexMetric(metric: CachedQuotaMetric | undefined): C
     if (healed.codex5hResetAtMs <= now) {
       healed.codex5h = '100%';
       healed.codex5hReset = undefined;
+    } else if (percentFromText(healed.codex5h) === 100) {
+      healed.codex5hReset = undefined;
     } else {
       healed.codex5hReset = formatSecondsCountdown((healed.codex5hResetAtMs - now) / 1000);
     }
@@ -358,6 +360,8 @@ export function healExpiredCodexMetric(metric: CachedQuotaMetric | undefined): C
     if (healed.codex7dResetAtMs <= now) {
       healed.codex7d = '100%';
       healed.codex7dReset = undefined;
+    } else if (percentFromText(healed.codex7d) === 100) {
+      healed.codex7dReset = undefined;
     } else {
       healed.codex7dReset = formatSecondsCountdown((healed.codex7dResetAtMs - now) / 1000);
     }
@@ -366,6 +370,8 @@ export function healExpiredCodexMetric(metric: CachedQuotaMetric | undefined): C
   if (typeof healed.codexCodeReviewResetAtMs === 'number' && healed.codexCodeReviewResetAtMs > 0) {
     if (healed.codexCodeReviewResetAtMs <= now) {
       healed.codexCodeReview = '100%';
+      healed.codexCodeReviewReset = undefined;
+    } else if (percentFromText(healed.codexCodeReview) === 100) {
       healed.codexCodeReviewReset = undefined;
     } else {
       healed.codexCodeReviewReset = formatSecondsCountdown(

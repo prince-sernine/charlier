@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { Vault } from './vault';
-import { QuotaService, formatTimeAgo } from './quota';
+import { QuotaService, formatTimeAgo, healExpiredAntigravityMetric } from './quota';
 import {
   CodexVault,
   CodexQuotaService,
@@ -704,55 +704,69 @@ export class UIController implements vscode.Disposable {
       return;
     }
 
+    const scheduleActivityProbe = (waitMs: number) => {
+      const existing = this.activityRefreshTimers[provider];
+      if (existing) {
+        clearTimeout(existing);
+      }
+      const timer = setTimeout(() => {
+        delete this.activityRefreshTimers[provider];
+        if (this.disposed || this.switchesInFlight.size > 0 || this.isAwaitingNewLogin()) {
+          return;
+        }
+        const now = Date.now();
+        if (provider === 'codex') {
+          const lastCodexFetch =
+            typeof (this.codexQuotaService as any).getLastFetchTime === 'function'
+              ? (this.codexQuotaService as any).getLastFetchTime()
+              : 0;
+          if (now - lastCodexFetch < 5000) {
+            this.scheduleUpdate(40, true);
+            return;
+          }
+          const elapsed = now - this.lastActivityRefreshAt.codex;
+          if (elapsed < 12_000) {
+            // Trailing reschedule so back-to-back turns never drop the final burn update.
+            scheduleActivityProbe(12_000 - elapsed + 100);
+            return;
+          }
+          this.lastActivityRefreshAt.codex = now;
+          const live = this.codexVault.getLiveSessionInfo?.();
+          if (!live || live.authMode === 'apikey' || (!live.email && !live.accountId && !live.hasOAuthCreds)) {
+            return;
+          }
+          this.codexQuotaService
+            .getActiveQuotaSummary?.(this.codexVault, true)
+            ?.then((res) => {
+              if (!this.disposed && res?.metric) {
+                this.scheduleUpdate(50, true);
+              }
+            })
+            .catch(() => {});
+        } else {
+          const elapsed = now - this.lastActivityRefreshAt.antigravity;
+          if (elapsed < 8_000) {
+            // Trailing reschedule so a write at turn-start never drops the post-turn 5h burn sync.
+            scheduleActivityProbe(8_000 - elapsed + 100);
+            return;
+          }
+          this.lastActivityRefreshAt.antigravity = now;
+          this.quotaService
+            .getQuotaSummary?.(true)
+            ?.then((summary) => {
+              if (!this.disposed && summary) {
+                this.scheduleUpdate(50, true);
+              }
+            })
+            .catch(() => {});
+        }
+      }, waitMs);
+      (timer as any)?.unref?.();
+      this.activityRefreshTimers[provider] = timer;
+    };
+
     const delayMs = provider === 'codex' ? 1200 : 2500;
-    const existing = this.activityRefreshTimers[provider];
-    if (existing) {
-      clearTimeout(existing);
-    }
-    const timer = setTimeout(() => {
-      delete this.activityRefreshTimers[provider];
-      if (this.disposed || this.switchesInFlight.size > 0 || this.isAwaitingNewLogin()) {
-        return;
-      }
-      const now = Date.now();
-      if (provider === 'codex') {
-        const lastCodexFetch =
-          typeof (this.codexQuotaService as any).getLastFetchTime === 'function'
-            ? (this.codexQuotaService as any).getLastFetchTime()
-            : 0;
-        if (now - lastCodexFetch < 5000) {
-          this.scheduleUpdate(40, true);
-          return;
-        }
-        if (now - this.lastActivityRefreshAt.codex < 12_000) return;
-        this.lastActivityRefreshAt.codex = now;
-        const live = this.codexVault.getLiveSessionInfo?.();
-        if (!live || live.authMode === 'apikey' || (!live.email && !live.accountId && !live.hasOAuthCreds)) {
-          return;
-        }
-        this.codexQuotaService
-          .getActiveQuotaSummary?.(this.codexVault, true)
-          ?.then((res) => {
-            if (!this.disposed && res?.metric) {
-              this.scheduleUpdate(50, true);
-            }
-          })
-          .catch(() => {});
-      } else {
-        if (now - this.lastActivityRefreshAt.antigravity < 15_000) return;
-        this.lastActivityRefreshAt.antigravity = now;
-        this.quotaService
-          .getQuotaSummary?.(true)
-          ?.then((summary) => {
-            if (!this.disposed && summary) {
-              this.scheduleUpdate(50, true);
-            }
-          })
-          .catch(() => {});
-      }
-    }, delayMs);
-    (timer as any)?.unref?.();
-    this.activityRefreshTimers[provider] = timer;
+    scheduleActivityProbe(delayMs);
   }
 
   public async runAutoRefreshTick(options?: {
@@ -1487,6 +1501,26 @@ export class UIController implements vscode.Disposable {
       codexActiveProfile?.authStatus === 'expired' ||
       codexAuthHealth?.authStatus === 'revoked' ||
       codexAuthHealth?.authStatus === 'expired';
+    // Prefer fresher in-memory stdout push metric (`account/rateLimits/updated`) over disk snapshot
+    if (!isCodexReauthPending && typeof codexSvc.getCachedMetric === 'function') {
+      const pushSummary = codexSvc.getCachedSummary?.();
+      const pushMetric = codexSvc.getCachedMetric?.();
+      const pushMatchesLive = Boolean(
+        pushMetric &&
+          pushSummary &&
+          ((codexLive.accountId && pushSummary.accountId === codexLive.accountId) ||
+            (codexLive.email &&
+              pushSummary.email?.toLowerCase() === codexLive.email.toLowerCase()))
+      );
+      if (
+        pushMatchesLive &&
+        pushMetric &&
+        (!rawCodexLiveMetric ||
+          (pushMetric.updatedAt || 0) >= (rawCodexLiveMetric.updatedAt || 0))
+      ) {
+        rawCodexLiveMetric = pushMetric;
+      }
+    }
     const needsLiveCodexMetric =
       (codexIsUnsavedSession && codexLive.authMode !== 'apikey') ||
       (Boolean(
@@ -4631,7 +4665,11 @@ export class UIController implements vscode.Disposable {
     };
 
     if (!isTargetActive && target) {
-      let cached = target.cachedQuota;
+      const targetNeedsReauth =
+        target.authStatus === 'revoked' || target.authStatus === 'expired';
+      let cached = targetNeedsReauth
+        ? target.cachedQuota
+        : healExpiredAntigravityMetric(target.cachedQuota);
       const qp = vscode.window.createQuickPick<vscode.QuickPickItem & { action?: string }>();
       let closed = false;
 
@@ -4679,8 +4717,10 @@ export class UIController implements vscode.Disposable {
         void this.quotaService
           .refreshInactiveProfile(target, this.vault, force)
           .then((refreshed) => {
-            if (refreshed) {
-              cached = refreshed;
+            const refreshedMetric =
+              targetNeedsReauth ? refreshed : healExpiredAntigravityMetric(refreshed);
+            if (refreshedMetric) {
+              cached = refreshedMetric;
               this.scheduleUpdate(60, true);
               if (force) {
                 vscode.window.setStatusBarMessage(
@@ -4860,9 +4900,13 @@ export class UIController implements vscode.Disposable {
         (activeProf.cachedQuota.gemini !== '--' ||
           activeProf.cachedQuota.claudeGpt !== '--')
       ) {
+        const activeNeedsReauth =
+          activeProf.authStatus === 'revoked' || activeProf.authStatus === 'expired';
         items.push(
           ...buildCachedAntigravityRows(
-            activeProf.cachedQuota,
+            activeNeedsReauth
+              ? activeProf.cachedQuota
+              : healExpiredAntigravityMetric(activeProf.cachedQuota),
             planTier,
             'No usage snapshot recorded'
           )

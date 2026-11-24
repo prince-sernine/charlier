@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { ActiveProviderId, CachedQuotaMetric, LiveSessionInfo, ProfileMetadata } from './types';
-import { formatTimeAgo } from './quota';
+import { formatTimeAgo, healExpiredAntigravityMetric } from './quota';
 import { healExpiredCodexMetric } from './codex';
 import {
   BestStandbyRecommendation,
@@ -187,7 +187,7 @@ function renderPoolBarRow(
           : '';
   const resetBadge = status
     ? `<span class="pool-reset ${pct === 0 && !isStale ? 'depleted' : ''}">${status}</span>`
-    : resetStr && resetStr !== 'now'
+    : pct !== 100 && resetStr && resetStr !== 'now'
       ? `<span class="pool-reset">${escapeHtml(resetStr)}</span>`
       : `<span class="pool-reset ready">${isStale ? 'Stale' : 'Active'}</span>`;
   const resetNote = status && resetStr && resetStr !== 'now'
@@ -1041,14 +1041,15 @@ export class CharlierSidebarProvider implements vscode.WebviewViewProvider {
       return `<div class="hero-card" data-card-key="hero-card"><div class="empty-state">${message}</div>${pitstopHtml}</div>`;
     }
 
-    const m = liveMetrics || activeProfile?.cachedQuota;
-    const plan = (activeProfile?.planOverride || m?.plan || 'FREE').toUpperCase();
-    const planClass = plan === 'FREE' ? 'free' : plan === 'ULTRA' ? 'ultra' : '';
     const authStatus = resolveEffectiveAuthStatus(activeProfile?.authStatus, liveSession.authStatus);
     const authErrorCode = activeProfile?.authErrorCode || liveSession.authErrorCode;
     const needsReauth = authStatus === 'revoked' || authStatus === 'expired';
     const needsVerify = !needsReauth && authStatus === 'unverified';
     const isMutedGauge = needsReauth || needsVerify;
+    const rawMetric = liveMetrics || activeProfile?.cachedQuota;
+    const m = needsReauth ? rawMetric : healExpiredAntigravityMetric(rawMetric);
+    const plan = (activeProfile?.planOverride || m?.plan || 'FREE').toUpperCase();
+    const planClass = plan === 'FREE' ? 'free' : plan === 'ULTRA' ? 'ultra' : '';
     const displayName = activeProfile
       ? activeProfile.name
       : (liveSession.email || 'Active').split('@')[0];
@@ -1445,11 +1446,12 @@ export class CharlierSidebarProvider implements vscode.WebviewViewProvider {
     isCliClaimed: boolean = false,
     isNextUp: boolean = false
   ): string {
-    const m = isActive && liveMetrics ? liveMetrics : p.cachedQuota;
-    const plan = (p.planOverride || m?.plan || 'FREE').toUpperCase();
     const needsReauth = p.authStatus === 'revoked' || p.authStatus === 'expired';
     const needsVerify = !needsReauth && p.authStatus === 'unverified';
     const isMutedGauge = needsReauth || needsVerify;
+    const rawMetric = isActive && liveMetrics ? liveMetrics : p.cachedQuota;
+    const m = needsReauth ? rawMetric : healExpiredAntigravityMetric(rawMetric);
+    const plan = (p.planOverride || m?.plan || 'FREE').toUpperCase();
     const snap = needsReauth
       ? (m?.updatedAt ? `stale · ${formatTimeAgo(m.updatedAt)}` : 'stale')
       : needsVerify

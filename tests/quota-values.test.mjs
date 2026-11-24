@@ -1902,3 +1902,182 @@ test('Cloud Code proto payloads omit metadata on models/quota, prioritize gemini
   assert.equal(brokenRes, 'failed');
   assert.equal(brokenRootProc.stdin, brokenOrigStdin, 'failed hotSwapCodexAppServer must restore previous rootProc.stdin cleanly');
 });
+
+test('healExpiredAntigravityMetric, inactive >6h weekly horizon classification, force_refresh=true daemon RPC, and Hover Claude 5h/7d parity', async () => {
+  const pastIso = new Date(Date.now() - 600_000).toISOString();
+  const future3h = new Date(Date.now() + 3 * 3600_000).toISOString();
+  const future6d = new Date(Date.now() + 6 * 86400_000).toISOString();
+
+  // 1. healExpiredAntigravityMetric promotes expired 5h & claude5h, strips bogus >6h gemini5hReset, and recomputes summary min
+  const healed = quota.healExpiredAntigravityMetric({
+    plan: 'PRO',
+    gemini: '32%',
+    claudeGpt: '0%',
+    argon: '--',
+    gemini5h: '32%',
+    gemini5hReset: pastIso,
+    gemini7d: '73%',
+    gemini7dReset: future6d,
+    claude5h: '0%',
+    claude5hReset: pastIso,
+    claude7d: '34%',
+    claude7dReset: future6d,
+    updatedAt: Date.now() - 1000
+  });
+  assert.equal(healed.gemini5h, '100%');
+  assert.equal(healed.gemini5hReset, undefined);
+  assert.equal(healed.gemini7d, '73%');
+  assert.equal(healed.gemini, '73%', 'summary gemini recomputes to min(100%, 73%)');
+  assert.equal(healed.claude5h, '100%');
+  assert.equal(healed.claudeGpt, '34%', 'summary claudeGpt recomputes to min(100%, 34%)');
+
+  // Legacy corrupted snapshot where a 7d reset timestamp leaked into gemini5hReset gets sanitized
+  const sanitized = quota.healExpiredAntigravityMetric({
+    plan: 'FREE',
+    gemini: '100%',
+    claudeGpt: '--',
+    argon: '--',
+    gemini5h: '100%',
+    gemini5hReset: future6d,
+    gemini7d: '100%',
+    updatedAt: Date.now()
+  });
+  assert.equal(sanitized.gemini5hReset, undefined, '7-day timestamp must never remain on gemini5hReset');
+  assert.equal(sanitized.gemini7dReset, future6d, '7-day timestamp migrates cleanly to gemini7dReset');
+
+  // 2. refreshInactiveProfile classifies fetchAvailableModels resetTime > 6h as gemini7d (NEVER overwriting gemini5h or stamping 6d onto 5h)
+  const svc = new quota.QuotaService();
+  svc.postCloudCodeJson = async (_at, ep) => {
+    if (ep.includes('loadCodeAssist')) return { status: 200, data: { paidTier: { id: 'g1-pro-tier' } } };
+    if (ep.includes('fetchAvailableModels')) {
+      return {
+        status: 200,
+        data: {
+          models: {
+            'gemini-4-hydrogen-sonar': {
+              quotaInfo: { remainingFraction: 0.72, resetTime: future6d }
+            }
+          }
+        }
+      };
+    }
+    return { status: 200, data: { groups: [] } };
+  };
+  svc.getAICodeJson = async () => ({ status: 200, data: {} });
+  const fakeVault = {
+    getProfileAccessToken: () => ({ accessToken: 'valid-at', expiryMs: Date.now() + 600_000 }),
+    getProfileRefreshToken: () => 'rt',
+    updateInactiveProfileToken: () => {},
+    updateProfileAuthHealth: () => true,
+    updateProfileCachedQuota: () => {}
+  };
+  const weeklyTightMetric = await svc.refreshInactiveProfile(
+    {
+      id: 'weekly-tight',
+      name: 'WeeklyTight',
+      email: 'wt@charlier.dev',
+      createdAt: 1,
+      updatedAt: 1,
+      cachedQuota: {
+        plan: 'PRO',
+        gemini: '73%',
+        claudeGpt: '34%',
+        argon: '--',
+        gemini5h: '90%',
+        gemini5hReset: future3h,
+        gemini7d: '73%',
+        gemini7dReset: future6d,
+        updatedAt: Date.now() - 60_000
+      }
+    },
+    fakeVault,
+    true
+  );
+  assert.equal(weeklyTightMetric?.gemini7d, '72%', '>6h resetTime must update gemini7d');
+  assert.equal(weeklyTightMetric?.gemini7dReset, future6d);
+  assert.equal(weeklyTightMetric?.gemini5h, '90%', '>6h weekly bucket must NOT clobber higher valid gemini5h');
+  assert.equal(weeklyTightMetric?.gemini5hReset, future3h, '5h reset timestamp must remain intact');
+  assert.equal(weeklyTightMetric?.gemini, '72%', 'summary gemini reflects tighter 72% weekly limit');
+
+  // 3. fetchFromDaemon always passes force_refresh: true to RetrieveUserQuotaSummary so agy never returns stale internal cache
+  const daemonSvc = new quota.QuotaService();
+  let capturedPayload = null;
+  daemonSvc.findActiveDaemon = () => ({ pid: 123, httpPort: 9999, csrfToken: 'tok' });
+  daemonSvc.queryDaemonRpcWithMeta = async (_d, pathStr, payload) => {
+    if (pathStr.includes('RetrieveUserQuotaSummary')) {
+      capturedPayload = payload;
+      return {
+        status: 200,
+        data: {
+          response: {
+            groups: [
+              { displayName: 'Gemini Models', buckets: [{ window: '5h', remainingFraction: 0.9 }, { window: 'weekly', remainingFraction: 0.72 }] }
+            ]
+          }
+        }
+      };
+    }
+    return { status: 200, data: { userStatus: { email: 'live@charlier.dev', userTier: { id: 'g1-pro-tier' } } } };
+  };
+  await daemonSvc.getQuotaSummary(false);
+  assert.deepEqual(capturedPayload, { force_refresh: true }, 'RetrieveUserQuotaSummary must pass force_refresh: true on cache miss');
+
+  // 4. Hover tooltip shows both 5h and 7d on Claude & GPT in both live (even when 5h === 100%) and cached fallback modes
+  const hoverSvc = new quota.QuotaService();
+  const liveHover = hoverSvc.buildAccountsHoverTooltip(
+    [{ id: 'p1', name: 'Pro', email: 'p@charlier.dev', updatedAt: Date.now() }],
+    'p1',
+    'p@charlier.dev',
+    {
+      email: 'p@charlier.dev',
+      planTier: 'PRO',
+      tier: 'Pro Plan',
+      fetchedAt: Date.now(),
+      groups: [
+        { displayName: 'Gemini Models', buckets: [{ window: '5h', remainingFraction: 0.9, resetTime: future3h }, { window: 'weekly', remainingFraction: 0.72, resetTime: future6d }] },
+        { displayName: 'Claude and GPT models', buckets: [{ window: '5h', remainingFraction: 1, resetTime: future3h }, { window: 'weekly', remainingFraction: 0.34, resetTime: future6d }] }
+      ]
+    }
+  );
+  assert.ok(liveHover.value.includes('5h:') && liveHover.value.includes('100%') && liveHover.value.includes('34%'), 'live Claude row must show both 5h and 7d even when 5h is 100%');
+
+  const cachedHover = hoverSvc.buildAccountsHoverTooltip(
+    [{
+      id: 'p1',
+      name: 'Pro',
+      email: 'p@charlier.dev',
+      updatedAt: Date.now(),
+      cachedQuota: {
+        plan: 'PRO',
+        gemini: '72%',
+        claudeGpt: '0%',
+        argon: '--',
+        gemini5h: '90%',
+        gemini5hReset: future3h,
+        gemini7d: '72%',
+        gemini7dReset: future6d,
+        claude5h: '0%',
+        claude5hReset: future3h,
+        claude7d: '34%',
+        claude7dReset: future6d,
+        updatedAt: Date.now()
+      }
+    }],
+    'p1',
+    'p@charlier.dev',
+    null
+  );
+  assert.ok(cachedHover.value.includes('5h:') && cachedHover.value.includes('0%') && cachedHover.value.includes('34%'), 'cached Claude row must render both 5h and 7d with accurate 5h reset');
+
+  // 5. healExpiredCodexMetric suppresses bogus future countdowns on 100% Codex bars
+  const fullCodex = codex.healExpiredCodexMetric({
+    plan: 'FREE',
+    gemini: '100%',
+    claudeGpt: '--',
+    argon: '--',
+    codex5h: '100%',
+    codex5hResetAtMs: Date.now() + 25 * 86400_000,
+    updatedAt: Date.now()
+  });
+  assert.equal(fullCodex.codex5hReset, undefined, '100% Codex pool must not display a countdown string');
+});

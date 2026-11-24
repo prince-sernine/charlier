@@ -623,3 +623,185 @@ test('flicker invariants: CSS gates drawerReveal on .is-opening, locks .btn-cli-
     controller.dispose();
   }
 });
+
+test('Cockpit PATCH_DOM live-updates 5h bars independently when 7d stays unchanged across Antigravity & Codex Hero and Standby drawers', async () => {
+  const built = await esbuild.build({
+    entryPoints: ['src/sidebar.ts'],
+    bundle: true,
+    platform: 'node',
+    format: 'cjs',
+    external: ['vscode'],
+    write: false,
+    logLevel: 'silent'
+  });
+  const mod = { exports: {} };
+  new Function('require', 'module', 'exports', '__dirname', built.outputFiles[0].text)(
+    (name) => (name === 'vscode' ? {} : nodeRequire(name)),
+    mod,
+    mod.exports,
+    path.resolve('dist')
+  );
+  const prov = new mod.exports.CharlierSidebarProvider({
+    onSelectProvider: async () => {},
+    onSwitchProfile: async () => {},
+    onRefreshAll: async () => {},
+    onRefreshSingle: async () => {},
+    onSaveActive: async () => {},
+    onAddAccount: async () => {},
+    onRenameProfile: async () => {},
+    onDeleteProfile: async () => {}
+  });
+
+  const future5h = new Date(Date.now() + 4 * 3600_000).toISOString();
+  const future7d = new Date(Date.now() + 6 * 86400_000).toISOString();
+  const mkState = (selectedProvider, g5, g7, c5, c7, st5, st7, cx5, cx7) => ({
+    selectedProvider,
+    antigravity: {
+      profiles: [
+        {
+          id: 'a1',
+          name: 'ActivePro',
+          email: 'a1@charlier.dev',
+          updatedAt: Date.now(),
+          cachedQuota: {
+            plan: 'PRO',
+            gemini: `${Math.min(g5, g7)}%`,
+            claudeGpt: `${Math.min(c5, c7)}%`,
+            argon: '--',
+            gemini5h: `${g5}%`,
+            gemini5hReset: future5h,
+            gemini7d: `${g7}%`,
+            gemini7dReset: future7d,
+            claude5h: `${c5}%`,
+            claude5hReset: future5h,
+            claude7d: `${c7}%`,
+            claude7dReset: future7d,
+            updatedAt: Date.now()
+          }
+        },
+        {
+          id: 'a2',
+          name: 'StandbyPro',
+          email: 'a2@charlier.dev',
+          updatedAt: Date.now() - 1000,
+          cachedQuota: {
+            plan: 'PRO',
+            gemini: `${Math.min(st5, st7)}%`,
+            claudeGpt: '100%',
+            argon: '--',
+            gemini5h: `${st5}%`,
+            gemini5hReset: future5h,
+            gemini7d: `${st7}%`,
+            gemini7dReset: future7d,
+            claude5h: '100%',
+            claude5hReset: future5h,
+            claude7d: '100%',
+            claude7dReset: future7d,
+            updatedAt: Date.now()
+          }
+        }
+      ],
+      activeProfileId: 'a1',
+      sessionKind: 'saved',
+      liveSession: { email: 'a1@charlier.dev', hasOAuthCreds: true, tokenExpiryDate: null, isExpired: false },
+      liveMetrics: {
+        plan: 'PRO',
+        gemini: `${Math.min(g5, g7)}%`,
+        claudeGpt: `${Math.min(c5, c7)}%`,
+        argon: '--',
+        gemini5h: `${g5}%`,
+        gemini5hReset: future5h,
+        gemini7d: `${g7}%`,
+        gemini7dReset: future7d,
+        claude5h: `${c5}%`,
+        claude5hReset: future5h,
+        claude7d: `${c7}%`,
+        claude7dReset: future7d,
+        updatedAt: Date.now()
+      },
+      formatReset: (iso) => (iso ? '4h 10m' : '')
+    },
+    codex: {
+      profiles: [
+        {
+          id: 'c1',
+          name: 'CodexHero',
+          email: 'c1@charlier.dev',
+          authMode: 'chatgpt',
+          updatedAt: Date.now(),
+          cachedQuota: {
+            plan: 'PLUS',
+            gemini: `${cx5}%`,
+            claudeGpt: `${cx7}%`,
+            argon: '--',
+            codex5h: `${cx5}%`,
+            codex5hReset: '3h 20m',
+            codex7d: `${cx7}%`,
+            codex7dReset: '5d 12h',
+            updatedAt: Date.now()
+          }
+        }
+      ],
+      activeProfileId: 'c1',
+      sessionKind: 'saved',
+      liveSession: { email: 'c1@charlier.dev', accountId: 'acc-1', hasOAuthCreds: true, tokenExpiryDate: null, isExpired: false },
+      liveMetrics: {
+        plan: 'PLUS',
+        gemini: `${cx5}%`,
+        claudeGpt: `${cx7}%`,
+        argon: '--',
+        codex5h: `${cx5}%`,
+        codex5hReset: '3h 20m',
+        codex7d: `${cx7}%`,
+        codex7dReset: '5d 12h',
+        updatedAt: Date.now()
+      }
+    }
+  });
+
+  const dom = createSidebarDomEnv(prov.buildHtml(mkState('antigravity', 94, 73, 0, 34, 80, 60, 82, 69)));
+  const getPool = (scopeSel, key) => {
+    const scope = dom.doc.querySelector(scopeSel);
+    const row = (scope?.querySelectorAll('.pool-row') || []).find(
+      (r) => r.getAttribute('data-card-key') === key
+    );
+    return {
+      val: row?.querySelector('.pool-val')?.textContent,
+      style: row?.querySelector('.pool-bar-fill')?.getAttribute('style') || '',
+      reset: row?.querySelector('.pool-reset')?.textContent
+    };
+  };
+
+  assert.equal(getPool('#hero-section', 'pool-Gemini · 5h Fast Pool').val, '94%');
+  assert.ok(getPool('#hero-section', 'pool-Gemini · 5h Fast Pool').style.includes('width: 94%'));
+  // 100% standby Claude 5h must show Active instead of a reset countdown
+  assert.equal(getPool('#drawer-a2', 'pool-Claude & GPT · 5h Fast Pool').reset, 'Active');
+
+  // Move ONLY 5h (94% -> 88%, standby 80% -> 71%) while 7d stays untouched (73% / 60%)
+  dom.postFromHost({
+    type: 'PATCH_DOM',
+    selectedProvider: 'antigravity',
+    bodyHtml: prov.buildBodyHtml(mkState('antigravity', 88, 73, 0, 34, 71, 60, 82, 69))
+  });
+  assert.equal(getPool('#hero-section', 'pool-Gemini · 5h Fast Pool').val, '88%');
+  assert.ok(getPool('#hero-section', 'pool-Gemini · 5h Fast Pool').style.includes('width: 88%'));
+  assert.equal(getPool('#hero-section', 'pool-Gemini · 7d Weekly Pool').val, '73%');
+  assert.equal(getPool('#drawer-a2', 'pool-Gemini · 5h Fast Pool').val, '71%');
+  assert.ok(getPool('#drawer-a2', 'pool-Gemini · 5h Fast Pool').style.includes('width: 71%'));
+
+  // Flip to Codex and move ONLY Codex 5h (82% -> 74%) while 7d stays 69%
+  dom.postFromHost({
+    type: 'PATCH_DOM',
+    selectedProvider: 'codex',
+    bodyHtml: prov.buildBodyHtml(mkState('codex', 88, 73, 0, 34, 71, 60, 82, 69))
+  });
+  assert.equal(getPool('#hero-section', 'pool-Codex · 5-Hour Fast Pool').val, '82%');
+  dom.postFromHost({
+    type: 'PATCH_DOM',
+    selectedProvider: 'codex',
+    bodyHtml: prov.buildBodyHtml(mkState('codex', 88, 73, 0, 34, 71, 60, 74, 69))
+  });
+  assert.equal(getPool('#hero-section', 'pool-Codex · 5-Hour Fast Pool').val, '74%');
+  assert.ok(getPool('#hero-section', 'pool-Codex · 5-Hour Fast Pool').style.includes('width: 74%'));
+  assert.equal(getPool('#hero-section', 'pool-Codex · 7-Day Weekly Pool').val, '69%');
+});
