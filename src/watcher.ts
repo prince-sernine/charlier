@@ -8,6 +8,21 @@ import {
   getProfilesDir
 } from './constants';
 
+export interface AntigravityActivityInfo {
+  dirKind: 'conversations' | 'annotations';
+  conversationIds: string[];
+}
+
+function extractConversationIdFromFilename(filename: string): string | null {
+  const base = path.basename(filename || '').trim();
+  if (!base || base.startsWith('.')) return null;
+  const cleaned = base.replace(
+    /(?:\.db-wal|\.db-journal|\.db-shm|\.db|\.pbtxt|\.pb|\.jsonl|\.json)$/i,
+    ''
+  );
+  return cleaned && cleaned !== base ? cleaned : null;
+}
+
 export class CredentialWatcher {
   private watchers: fs.FSWatcher[] = [];
   private codexDirWatcher: fs.FSWatcher | null = null;
@@ -16,6 +31,8 @@ export class CredentialWatcher {
   private debounceTimer: NodeJS.Timeout | null = null;
   private unmuteTimer: NodeJS.Timeout | null = null;
   private activityDebounceTimer: NodeJS.Timeout | null = null;
+  private pendingActivityDirKind: 'conversations' | 'annotations' | null = null;
+  private pendingActivityConvIds = new Set<string>();
   private pendingMutedEvent = false;
   private mutedUntil = 0;
   private disposed = false;
@@ -24,14 +41,14 @@ export class CredentialWatcher {
   private readonly startedAt = Date.now();
   private readonly onChangeCallback: () => void;
   private readonly shouldWatchIdeStorage?: () => boolean;
-  private readonly onAntigravityActivity?: () => void;
+  private readonly onAntigravityActivity?: (info: AntigravityActivityInfo) => void;
   private readonly antigravityActivitySubdirs: Set<string>;
 
   constructor(
     onChange: () => void,
     options?: {
       shouldWatchIdeStorage?: () => boolean;
-      onAntigravityActivity?: () => void;
+      onAntigravityActivity?: (info: AntigravityActivityInfo) => void;
       antigravityActivitySubdirs?: string[];
     }
   ) {
@@ -189,8 +206,13 @@ export class CredentialWatcher {
       if (fs.existsSync(geminiDir)) {
         try {
           const w = fs.watch(geminiDir, (_eventType, filename) => {
-            const name = filename ? filename.toString() : '';
-            if (!name || name === 'google_accounts.json' || name === 'oauth_creds.json') {
+            const name = filename ? filename.toString().toLowerCase() : '';
+            if (
+              !name ||
+              name === 'google_accounts.json' ||
+              name === 'oauth_creds.json' ||
+              name === 'jetski-standalone-oauth-token'
+            ) {
               this.triggerDebounced();
             }
           });
@@ -206,7 +228,7 @@ export class CredentialWatcher {
           if (this.disposed || !fs.existsSync(antigravityDir)) return;
           try {
             const w = fs.watch(antigravityDir, (_eventType, filename) => {
-              const name = filename ? filename.toString() : '';
+              const name = filename ? filename.toString().toLowerCase() : '';
               if (
                 !name ||
                 name === 'google_accounts.json' ||
@@ -224,7 +246,7 @@ export class CredentialWatcher {
             if (this.disposed || !fs.existsSync(daemonDir)) return;
             try {
               const dw = fs.watch(daemonDir, (_eventType, filename) => {
-                const name = filename ? filename.toString() : '';
+                const name = filename ? filename.toString().toLowerCase() : '';
                 if (!name || (name.startsWith('hub_') && name.endsWith('.json'))) {
                   this.triggerDebounced();
                 }
@@ -243,7 +265,7 @@ export class CredentialWatcher {
           }
 
           if (this.onAntigravityActivity && this.antigravityActivitySubdirs.has(subName)) {
-            for (const activitySub of ['conversations', 'annotations']) {
+            for (const activitySub of ['conversations', 'annotations'] as const) {
               const actDir = path.join(antigravityDir, activitySub);
               const attachActivityDir = () => {
                 if (this.disposed || !fs.existsSync(actDir)) return;
@@ -260,7 +282,8 @@ export class CredentialWatcher {
                     ) {
                       return;
                     }
-                    this.triggerActivityDebounced();
+                    const convId = name ? extractConversationIdFromFilename(name) : null;
+                    this.triggerActivityDebounced(activitySub, convId);
                   });
                   this.trackWatcher(aw);
                 } catch {}
@@ -301,7 +324,7 @@ export class CredentialWatcher {
             if (!this.shouldWatchIdeStorage?.()) {
               return;
             }
-            const name = filename ? filename.toString() : '';
+            const name = filename ? filename.toString().toLowerCase() : '';
             if (name === 'state.vscdb' || name === 'state.vscdb-wal') {
               this.triggerDebounced();
             }
@@ -349,7 +372,7 @@ export class CredentialWatcher {
       if (this.disposed || !fs.existsSync(charlierDir)) return;
       try {
         const sw = fs.watch(charlierDir, (_eventType, filename) => {
-          const name = filename ? filename.toString() : '';
+          const name = filename ? filename.toString().toLowerCase() : '';
           if (!name || name === 'state.json') {
             const nextKey = readStateActiveKey();
             if (nextKey !== this.lastWatchedStateActiveKey) {
@@ -450,16 +473,32 @@ export class CredentialWatcher {
     } catch {}
   }
 
-  private triggerActivityDebounced(): void {
+  private triggerActivityDebounced(
+    dirKind: 'conversations' | 'annotations',
+    conversationId: string | null
+  ): void {
     if (this.disposed || !this.onAntigravityActivity) return;
     if (Date.now() - this.startedAt < 2000) return;
+    if (dirKind === 'conversations' || !this.pendingActivityDirKind) {
+      this.pendingActivityDirKind = dirKind;
+    }
+    if (conversationId) {
+      this.pendingActivityConvIds.add(conversationId);
+    }
     if (this.activityDebounceTimer) {
       clearTimeout(this.activityDebounceTimer);
     }
     this.activityDebounceTimer = setTimeout(() => {
       this.activityDebounceTimer = null;
+      const batchKind = this.pendingActivityDirKind || dirKind;
+      const batchIds = Array.from(this.pendingActivityConvIds);
+      this.pendingActivityDirKind = null;
+      this.pendingActivityConvIds.clear();
       if (this.disposed) return;
-      this.onAntigravityActivity?.();
+      this.onAntigravityActivity?.({
+        dirKind: batchKind,
+        conversationIds: batchIds
+      });
     }, 35);
     (this.activityDebounceTimer as any)?.unref?.();
   }

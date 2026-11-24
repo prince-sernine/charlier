@@ -5,6 +5,14 @@ import * as esbuild from 'esbuild';
 
 const nodeRequire = createRequire(import.meta.url);
 
+const vscodeMock = {
+  commands: { executeCommand: async () => {} },
+  MarkdownString: class {
+    value = '';
+    appendMarkdown(value) { this.value += value; }
+  }
+};
+
 async function loadSource(entry, extraModules = {}) {
   const result = await esbuild.build({
     entryPoints: [entry], bundle: true, platform: 'node', format: 'cjs',
@@ -13,12 +21,7 @@ async function loadSource(entry, extraModules = {}) {
   const module = { exports: {} };
   const requireModule = (name) => {
     if (name === 'vscode') {
-      return {
-        MarkdownString: class {
-          value = '';
-          appendMarkdown(value) { this.value += value; }
-        }
-      };
+      return vscodeMock;
     }
     if (extraModules[name]) return extraModules[name];
     return nodeRequire(name);
@@ -122,7 +125,7 @@ test('Antigravity ignores absent and disabled buckets but keeps true depletion',
   assert.equal(parsed.gemini7d, '42%');
   assert.equal(parsed.gemini, '42%');
   assert.equal(parsed.claudeGpt, '--');
-  assert.equal(parsed.argon, '0%');
+  assert.equal(parsed.argon, '--');
   assert.equal(values.lowestRemainingPercent(summary.groups, false), 0);
   assert.equal(values.lowestRemainingPercent(summary.groups, true), 42);
   assert.equal(values.lowestRemainingPercent([
@@ -177,15 +180,15 @@ test('Codex hover keeps unknown usage empty and only trusts its own actions', ()
   assert.equal(tooltip.isTrusted.enabledCommands.includes('charlier.switchProvider'), true);
 });
 
-test('Antigravity status bar summary surfaces Argon on Pro, averages tier pools for color, hides synthetic Ultra A, and blocks mismatched email', () => {
+test('Antigravity status bar summary uses unified 2-pool layout, ignores retired Argon, surfaces standalone extra pool dynamically, and blocks mismatched email', () => {
   const proProfile = {
     id: 'p1',
     name: 'Sernine',
     email: 'sernine@example.test',
     cachedQuota: {
       plan: 'PRO',
-      gemini: '75%',
-      claudeGpt: '50%',
+      gemini: '60%',
+      claudeGpt: '30%',
       argon: '6%',
       updatedAt: Date.now()
     }
@@ -194,12 +197,11 @@ test('Antigravity status bar summary surfaces Argon on Pro, averages tier pools 
     email: 'sernine@example.test',
     tier: 'Pro Plan',
     planTier: 'PRO',
-    hasArgonGroup: true,
+    hasArgonGroup: false,
     fetchedAt: Date.now(),
     groups: [
-      { displayName: 'Gemini', buckets: [{ bucketId: 'g5h', displayName: '5h', window: '5h', remainingFraction: 0.75 }] },
-      { displayName: 'Claude & GPT', buckets: [{ bucketId: 'c7d', displayName: '7d', window: 'weekly', remainingFraction: 0.5 }] },
-      { displayName: 'Gemini 4 Argon', buckets: [{ bucketId: 'a7d', displayName: '7d', window: 'weekly', remainingFraction: 0.06 }] }
+      { displayName: 'Gemini Models', buckets: [{ bucketId: 'g5h', displayName: '5h', window: '5h', remainingFraction: 0.6 }] },
+      { displayName: 'Claude and GPT models', buckets: [{ bucketId: 'c7d', displayName: '7d', window: 'weekly', remainingFraction: 0.3 }] }
     ]
   };
   const res = values.formatAntigravityStatusBarSummary({
@@ -208,8 +210,8 @@ test('Antigravity status bar summary surfaces Argon on Pro, averages tier pools 
     quota: liveSummary,
     liveMetrics: null
   });
-  assert.equal(res.quotaText, 'G 75% · C 50% · A 6%');
-  assert.equal(res.minPct, 44);
+  assert.equal(res.quotaText, 'G 60% · C 30%');
+  assert.equal(res.minPct, 45);
   assert.equal(values.resolveQuotaTone(res.minPct, 'antigravity', false).colorId, 'charlier.quotaWarn');
 
   const proWithCarbon = values.formatAntigravityStatusBarSummary({
@@ -221,8 +223,8 @@ test('Antigravity status bar summary surfaces Argon on Pro, averages tier pools 
     quota: null,
     liveMetrics: null
   });
-  assert.equal(proWithCarbon.quotaText, 'G 75% · C 50% · A 6% · Cb 9%');
-  assert.equal(proWithCarbon.minPct, 35);
+  assert.equal(proWithCarbon.quotaText, 'G 60% · C 30% · Cb 9%');
+  assert.equal(proWithCarbon.minPct, 33);
   assert.equal(values.resolveQuotaTone(proWithCarbon.minPct, 'antigravity', false).colorId, 'charlier.quotaWarn');
 
   const mismatch = values.formatAntigravityStatusBarSummary({
@@ -318,7 +320,9 @@ test('unified status bar text, tier sorting, Hover Matrix Carbon column, Codex l
     'hortense@charlier.dev',
     null
   );
-  assert.match(agyHover.value, /Carbon/);
+  assert.doesNotMatch(agyHover.value, /Argon/);
+  assert.doesNotMatch(agyHover.value, /\|\s*&nbsp;Carbon&nbsp;\s*\|/);
+  assert.match(agyHover.value, /Hydrogen, Neon, Carbon/);
   assert.ok(agyHover.value.indexOf('Rénine') < agyHover.value.indexOf('Charlier&nbsp;Labs'));
 
   const now = 500_000;
@@ -1198,7 +1202,7 @@ test('resolveBestStandbyProfile recommends highest-headroom unclaimed healthy st
   });
   assert.ok(pickedAgy);
   assert.equal(pickedAgy.profile.id, 'a-ok');
-  assert.equal(pickedAgy.scorePct, 86);
+  assert.equal(pickedAgy.scorePct, 89);
 
   const agySvc = new quota.QuotaService();
   const agyHover = agySvc.buildAccountsHoverTooltip(agyProfiles, 'a-rev', 'ar@example.test', null);
@@ -1464,7 +1468,7 @@ test('Codex attachStdoutObserver parses live account/rateLimits/updated, emits t
     fs.mkdirSync(cliHomeDir, { recursive: true });
     const cliFreshJwt = makeJwt('rtr@example.test', 'acc-rtr', Math.floor(Date.now() / 1000) + 7200);
     fs.writeFileSync(path.join(cliHomeDir, 'auth.json'), JSON.stringify({
-      last_refresh: '2026-11-21T00:00:00.000Z',
+      last_refresh: new Date(Date.now() + 86_400_000).toISOString(),
       tokens: { access_token: cliFreshJwt, refresh_token: 'rt-cli-live', id_token: cliFreshJwt, account_id: 'acc-rtr' }
     }));
     fs.unlinkSync(path.join(codexDir, 'auth.json'));
@@ -1546,5 +1550,355 @@ test('QuotaService preserves cached summary on transient empty daemon response a
   );
   assert.equal(mintCalls, 0, 'unexpired cached access_token must skip redundant OAuth token mint');
   assert.equal(metric?.gemini, '90%', 'un-resettable stale gemini7d without reset timestamp must not cap fresh gemini5h');
+  assert.equal(metric?.argon, '--', 'retired Argon must be wiped to -- on refreshInactiveProfile');
   assert.equal(savedQuota?.gemini, '90%');
+});
+
+test('Cloud Code proto payloads omit metadata on models/quota, prioritize gemini-4-hydrogen, hydrateActiveDaemonInPlace runs zero-kill HasAuthToken, and Codex Hover Matrix surfaces reset credits on Active + Standby rows', async () => {
+  const svc = new quota.QuotaService();
+  const postedPayloads = [];
+  let forceFirstModels401 = true;
+  let mintCount = 0;
+  svc.mintAccessTokenFromRefresh = async () => {
+    mintCount++;
+    return { ok: true, access_token: 'fresh-minted-token', expires_in: 3600 };
+  };
+  svc.postCloudCodeJson = async (at, ep, body) => {
+    postedPayloads.push({ at, ep, body });
+    if (ep.includes('loadCodeAssist')) {
+      return { status: 200, data: { cloudaicompanionProject: 'proj-1' } };
+    }
+    if (forceFirstModels401) {
+      forceFirstModels401 = false;
+      return { status: 401, data: null };
+    }
+    if (ep.includes('fetchAvailableModels')) {
+      return {
+        status: 200,
+        data: {
+          models: {
+            'tab_flash_lite_preview': { quotaInfo: { remainingFraction: 1 } },
+            'gemini-4-hydrogen-sonar': { quotaInfo: { remainingFraction: 0.77, resetTime: new Date(Date.now() + 3600_000).toISOString() } },
+            'gemini-3.8-flash-tiered': { quotaInfo: { remainingFraction: 0.11 } }
+          }
+        }
+      };
+    }
+    return {
+      status: 200,
+      data: {
+        groups: [
+          {
+            displayName: 'Claude and GPT models',
+            buckets: [
+              { window: '5h', remainingFraction: 0.64 },
+              { window: 'weekly', remainingFraction: 0.82 }
+            ]
+          }
+        ]
+      }
+    };
+  };
+  svc.getAICodeJson = async () => ({ status: 200, data: {} });
+
+  const refreshed = await svc.refreshInactiveProfile(
+    {
+      id: 'pro-standby',
+      name: 'Standby Pro',
+      email: 'pro@charlier.dev',
+      createdAt: 1,
+      updatedAt: 1,
+      cachedQuota: { plan: 'FREE', gemini: '--', claudeGpt: '--', argon: '100%', updatedAt: 1 }
+    },
+    {
+      getProfileAccessToken: () => ({ accessToken: 'expired-cached-token', expiryMs: Date.now() + 500_000 }),
+      getProfileRefreshToken: () => 'valid-rt',
+      updateInactiveProfileToken: () => {},
+      updateProfileAuthHealth: () => true,
+      updateProfileCachedQuota: () => {}
+    },
+    true
+  );
+  const modelsReq = postedPayloads.find((p) => p.ep.includes('fetchAvailableModels'));
+  const quotaReq = postedPayloads.find((p) => p.ep.includes('retrieveUserQuotaSummary'));
+  assert.equal('metadata' in (modelsReq?.body || {}), false, 'fetchAvailableModels must NOT send metadata field');
+  assert.equal('metadata' in (quotaReq?.body || {}), false, 'retrieveUserQuotaSummary must NOT send metadata field');
+  assert.equal(mintCount, 1, '401 on cached token must remint and retry cleanly');
+  assert.equal(refreshed?.plan, 'PRO', '3p-5h bucket presence must resolve PRO even when paidTier is omitted');
+  assert.equal(refreshed?.gemini, '77%', 'must prioritize gemini-4-hydrogen-sonar over retiring 3.8-flash and tab_*');
+  assert.equal(refreshed?.claudeGpt, '64%');
+  assert.equal(refreshed?.argon, '--');
+
+  // Zero-kill in-place HasAuthToken hydration: must NOT call slow GetAuthStatus (~4s)
+  // and must fire `antigravity.reconnect` immediately after HasAuthToken before waiting on GetUserStatus
+  const rpcCalls = [];
+  const timeline = [];
+  let reconnectCalled = 0;
+  vscodeMock.commands.executeCommand = async (cmd) => {
+    if (cmd === 'antigravity.reconnect') {
+      reconnectCalled++;
+      timeline.push('reconnect');
+    }
+  };
+  svc.findActiveDaemon = () => ({ pid: 99999, httpPort: 41234, csrfToken: 'csrf' });
+  svc.queryDaemonRpcWithMeta = async (_d, rpcPath) => {
+    rpcCalls.push(rpcPath);
+    if (rpcPath.endsWith('/HasAuthToken')) {
+      timeline.push('HasAuthToken');
+      return { status: 200, data: { hasToken: true } };
+    }
+    if (rpcPath.endsWith('/GetUserStatus')) {
+      timeline.push('GetUserStatus');
+      return { status: 200, data: { userStatus: { email: 'hortense@charlier.dev' } } };
+    }
+    return { status: 0, data: null };
+  };
+  let hydratedCallback = 0;
+  const hStatus = await svc.hydrateActiveDaemonInPlace('hortense@charlier.dev', () => {
+    hydratedCallback++;
+  });
+  assert.equal(hStatus, 'hydrated');
+  assert.equal(hydratedCallback, 1);
+  assert.equal(reconnectCalled, 1);
+  assert.equal(
+    rpcCalls.some((p) => p.endsWith('/GetAuthStatus')),
+    false,
+    'hydrateActiveDaemonInPlace must NOT call blocking ~4s GetAuthStatus RPC'
+  );
+  assert.deepEqual(
+    timeline,
+    ['HasAuthToken', 'reconnect', 'GetUserStatus'],
+    'antigravity.reconnect must fire immediately after HasAuthToken before waiting on GetUserStatus'
+  );
+
+  // Extra dynamic upstream pool consistency between parseMetrics and Status Bar / Hover
+  const extraParsed = svc.parseMetrics({
+    planTier: 'PRO',
+    groups: [
+      { displayName: 'Gemini Models', buckets: [{ window: '5h', remainingFraction: 0.9 }] },
+      { displayName: 'Claude and GPT models', buckets: [{ window: '5h', remainingFraction: 0.8 }] },
+      { displayName: 'Experimental Pool', buckets: [{ window: 'weekly', remainingFraction: 0.55 }] }
+    ]
+  });
+  assert.equal(extraParsed.carbon, '55%', 'parseMetrics must surface unexpected extra paid pools consistently');
+
+  // gRPC-Web HTTP 200 error (grpcStatus !== '0' / data: null) must NOT fire reconnect or pass HasAuthToken
+  let errReconnectCalled = 0;
+  let errUserStatusCalled = 0;
+  vscodeMock.commands.executeCommand = async (cmd) => {
+    if (cmd === 'antigravity.reconnect') errReconnectCalled++;
+  };
+  svc.queryDaemonRpcWithMeta = async (_d, rpcPath) => {
+    if (rpcPath.endsWith('/HasAuthToken')) return { status: 200, data: null, grpcStatus: '12' };
+    if (rpcPath.endsWith('/GetUserStatus')) {
+      errUserStatusCalled++;
+      return { status: 200, data: { userStatus: { email: 'hortense@charlier.dev' } } };
+    }
+    return { status: 0, data: null };
+  };
+  const errHStatus = await svc.hydrateActiveDaemonInPlace('hortense@charlier.dev');
+  assert.equal(errHStatus, 'needs-respawn', 'gRPC-Web UNIMPLEMENTED (status 200, grpcStatus 12, data null) must immediately fall back to needs-respawn');
+  assert.equal(errReconnectCalled, 0, 'failed HasAuthToken must not fire antigravity.reconnect');
+  assert.equal(errUserStatusCalled, 0, 'failed HasAuthToken must not burn time polling GetUserStatus');
+
+  // Offline / timeout across all Cloud Code endpoints must preserve existing PRO cachedQuota and authStatus
+  const offlineSvc = new quota.QuotaService();
+  offlineSvc.postCloudCodeJson = async () => ({ status: 0, data: null });
+  offlineSvc.getAICodeJson = async () => ({ status: 0, data: null });
+  let offlineSavedQuota = null;
+  let offlineSavedHealth = null;
+  const preservedPro = {
+    plan: 'PRO',
+    gemini: '82%',
+    claudeGpt: '74%',
+    argon: '--',
+    updatedAt: 1000
+  };
+  const offlineResult = await offlineSvc.refreshInactiveProfile(
+    {
+      id: 'offline-pro',
+      name: 'Offline Pro',
+      email: 'offline@charlier.dev',
+      createdAt: 1,
+      updatedAt: 1,
+      authStatus: 'expired',
+      cachedQuota: preservedPro
+    },
+    {
+      getProfileAccessToken: () => ({ accessToken: 'cached-valid-token', expiryMs: Date.now() + 600_000 }),
+      getProfileRefreshToken: () => 'rt-offline',
+      updateInactiveProfileToken: () => {},
+      updateProfileAuthHealth: (_id, h) => { offlineSavedHealth = h; return true; },
+      updateProfileCachedQuota: (_id, q) => { offlineSavedQuota = q; }
+    },
+    true
+  );
+  assert.equal(offlineResult?.plan, 'PRO', 'all-endpoint offline failure must keep cached PRO plan');
+  assert.equal(offlineResult?.claudeGpt, '74%', 'all-endpoint offline failure must not wipe cached claudeGpt to --');
+  assert.equal(offlineSavedQuota, null, 'all-endpoint offline failure must not overwrite disk cachedQuota');
+  assert.equal(offlineSavedHealth, null, 'all-endpoint offline failure must not falsely stamp authStatus ok');
+
+  // Codex Hover Matrix: reset credits inline badge on BOTH Active and Standby rows (when > 0)
+  const codexSvc = new codex.CodexQuotaService();
+  const codexHover = codexSvc.buildCodexHoverTooltip(
+    [
+      {
+        id: 'c-active',
+        name: 'Hortense',
+        email: 'hortense@charlier.dev',
+        cachedQuota: { plan: 'PLUS', gemini: '80%', claudeGpt: '90%', argon: '--', codex5h: '80%', codex7d: '90%', codexResetCredits: 2, updatedAt: Date.now() },
+        updatedAt: Date.now()
+      },
+      {
+        id: 'c-standby',
+        name: 'Renine',
+        email: 'renine@charlier.dev',
+        cachedQuota: { plan: 'PLUS', gemini: '70%', claudeGpt: '85%', argon: '--', codex5h: '70%', codex7d: '85%', codexResetCredits: 3, updatedAt: Date.now() },
+        updatedAt: Date.now() - 1000
+      },
+      {
+        id: 'c-zero',
+        name: 'Victoire',
+        email: 'victoire@charlier.dev',
+        cachedQuota: { plan: 'PLUS', gemini: '95%', claudeGpt: '95%', argon: '--', codex5h: '95%', codex7d: '95%', codexResetCredits: 0, updatedAt: Date.now() },
+        updatedAt: Date.now() - 2000
+      }
+    ],
+    'c-active',
+    null,
+    { email: 'hortense@charlier.dev' }
+  );
+  assert.match(codexHover.value, /\*\*Hortense\*\*[\s\S]*?\$\(zap\)&nbsp;2/, 'Active row in Hover Matrix must include $(zap) 2 badge');
+  assert.match(codexHover.value, /\[Renine\][\s\S]*?\$\(zap\)&nbsp;3/, 'Standby row in Hover Matrix must include $(zap) 3 badge');
+  assert.doesNotMatch(codexHover.value, /\[Victoire\][^\n]*\$\(zap\)/, 'Zero reset credits must not render noisy badge');
+
+  // applyLiveRateLimitsPush clears stale balance when hasCredits becomes false & flags reset jump
+  codexSvc.cachedMetric = {
+    plan: 'PLUS',
+    gemini: '10%',
+    claudeGpt: '80%',
+    argon: '--',
+    codex5h: '10%',
+    codex7d: '80%',
+    codexResetCredits: 2,
+    codexCreditsBalance: '$14.00',
+    updatedAt: Date.now()
+  };
+  const fakeCodexVault = {
+    readDecodedActiveAuth: () => ({ email: 'hortense@charlier.dev', accountId: 'acc-h', authMode: 'chatgpt', planTier: 'PLUS' }),
+    findMatchingProfile: () => null,
+    updateProfileCachedQuota: () => {},
+    updateProfileAuthHealth: () => {}
+  };
+  const pushed = codexSvc.applyLiveRateLimitsPush(fakeCodexVault, {
+    primary: { usedPercent: 0, resetsAt: Math.floor(Date.now() / 1000) + 18000 },
+    secondary: { usedPercent: 20, resetsAt: Math.floor(Date.now() / 1000) + 86400 },
+    credits: { hasCredits: false, balance: null }
+  });
+  assert.equal(pushed?.codex5h, '100%');
+  assert.equal(pushed?.codexCreditsBalance, undefined, 'hasCredits:false must clear stale codexCreditsBalance');
+  assert.equal(codexSvc.getLastFetchTime(), 0, 'mid-session 5h jump from 10% -> 100% with credits > 0 must arm immediate wham/usage sync');
+
+  // Codex hotSwapCodexAppServer: immediate visual remount pulse (< 80ms even when initialize takes 140ms)
+  // and FIFO buffering of rootProc.stdin writes until replacement app-server completes initialize
+  const { PassThrough, Writable } = nodeRequire('stream');
+  const parserWrites = [];
+  const parserMock = new Writable({
+    write(chunk, _enc, cb) {
+      for (const line of chunk.toString('utf8').split('\n')) {
+        if (line.trim()) parserWrites.push({ at: Date.now(), line });
+      }
+      cb();
+    }
+  });
+  const mockServerScript = [
+    "setTimeout(() => process.exit(0), 4000).unref();",
+    "let buf='';",
+    "process.stdin.on('data', d => {",
+    "  buf += d.toString('utf8');",
+    "  const lines = buf.split('\\n'); buf = lines.pop() ?? '';",
+    "  for (const l of lines) {",
+    "    if (!l.trim()) continue;",
+    "    const msg = JSON.parse(l);",
+    "    if (msg.method === 'initialize') {",
+    "      setTimeout(() => process.stdout.write(JSON.stringify({ id: msg.id, result: { ok: true } }) + '\\n'), 140);",
+    "    } else if (msg.method === 'account/read') {",
+    "      process.stdout.write(JSON.stringify({ id: msg.id, result: { account: { email: 'buffered@charlier.dev' } } }) + '\\n');",
+    "    }",
+    "  }",
+    "});"
+  ].join('');
+  const oldStdout = new PassThrough();
+  oldStdout._readableState = { pipes: parserMock };
+  const fakeRootProc = {
+    pid: -1,
+    spawnfile: process.execPath,
+    spawnargs: [process.execPath, '-e', mockServerScript],
+    stdout: oldStdout,
+    stdin: new PassThrough(),
+    stderr: new PassThrough(),
+    removeAllListeners() {},
+    kill() { return true; }
+  };
+  const swapSvc = new codex.CodexQuotaService();
+  swapSvc.graftedRootProc = fakeRootProc;
+  swapSvc.graftedCurrentChild = fakeRootProc;
+  swapSvc.graftedParser = parserMock;
+  swapSvc.ensureGraftedHandles = () => true;
+
+  try {
+    const swapStart = Date.now();
+    const swapPromise = swapSvc.hotSwapCodexAppServer('chatgpt');
+    // Wait 75ms: pulse (prime + null + login/completed + authMode) must already have fired
+    // BEFORE the 140ms mock initialize finishes, and writing to fakeRootProc.stdin must buffer safely!
+    await new Promise((r) => setTimeout(r, 75));
+    const preInitMethods = parserWrites.map((w) => JSON.parse(w.line).method);
+    assert.ok(
+      preInitMethods.includes('account/updated') && preInitMethods.includes('account/login/completed'),
+      `Visual remount pulse must fire immediately before initialize completes (got: ${preInitMethods.join(',')})`
+    );
+    let bufferedWriteAcked = false;
+    fakeRootProc.stdin.write(
+      JSON.stringify({ id: 'buf-req-1', method: 'account/read', params: { refreshToken: false } }) + '\n',
+      (err) => {
+        if (!err) bufferedWriteAcked = true;
+      }
+    );
+    const swapRes = await swapPromise;
+    assert.equal(swapRes, 'swapped');
+    assert.ok(Date.now() - swapStart >= 130, 'mock initialize must have actually completed');
+    // Wait briefly for buffered account/read echo to arrive on parserMock
+    await new Promise((r) => setTimeout(r, 80));
+    assert.equal(bufferedWriteAcked, true, 'buffered stdin write callback must settle after flush');
+    assert.ok(
+      parserWrites.some((w) => w.line.includes('"buf-req-1"') && w.line.includes('buffered@charlier.dev')),
+      'buffered JSON-RPC request written during respawn must flush FIFO to replacement app-server'
+    );
+  } finally {
+    try {
+      fakeRootProc.kill('SIGKILL');
+    } catch {}
+  }
+
+  // Regression guard: synchronous spawn failure inside hotSwapCodexAppServer must restore rootProc.stdin
+  // and settle buffered callbacks with error instead of leaving rootProc.stdin wedged on bufferedStdin
+  const brokenOrigStdin = new PassThrough();
+  const brokenRootProc = {
+    pid: -1,
+    spawnfile: nodeRequire('path').join(nodeRequire('os').tmpdir(), 'charlier-nonexistent-codex-binary-xyz-99999'),
+    spawnargs: ['nonexistent'],
+    stdout: new PassThrough(),
+    stdin: brokenOrigStdin,
+    stderr: new PassThrough(),
+    removeAllListeners() {},
+    kill() { return true; }
+  };
+  const brokenSwapSvc = new codex.CodexQuotaService();
+  brokenSwapSvc.graftedRootProc = brokenRootProc;
+  brokenSwapSvc.graftedCurrentChild = brokenRootProc;
+  brokenSwapSvc.graftedParser = parserMock;
+  brokenSwapSvc.ensureGraftedHandles = () => true;
+  const brokenRes = await brokenSwapSvc.hotSwapCodexAppServer('chatgpt');
+  assert.equal(brokenRes, 'failed');
+  assert.equal(brokenRootProc.stdin, brokenOrigStdin, 'failed hotSwapCodexAppServer must restore previous rootProc.stdin cleanly');
 });

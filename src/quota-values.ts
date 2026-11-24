@@ -320,11 +320,9 @@ export function formatAntigravityStatusBarSummary(options: {
     'FREE'
   ).toUpperCase();
   const isFree = effectiveTier === 'FREE';
-  const isUltra = effectiveTier === 'ULTRA';
 
   let gPct: number | null = null;
   let cPct: number | null = null;
-  let aPct: number | null = null;
   let cbPct: number | null = null;
   let minPct: number | null = null;
 
@@ -357,24 +355,27 @@ export function formatAntigravityStatusBarSummary(options: {
         if (claudeFracs.length > 0) cPct = Math.min(...claudeFracs);
       }
 
-      if (!isUltra) {
-        aPct = liveMetrics ? percentFromText(liveMetrics.argon) : null;
-        if (aPct === null) {
-          const argonFracs = groupFractions((lower) => lower.includes('argon'));
-          if (argonFracs.length > 0) aPct = Math.min(...argonFracs);
-        }
-      }
-
-      cbPct = liveMetrics ? percentFromText(liveMetrics.carbon) : null;
+      cbPct =
+        liveMetrics?.carbon && liveMetrics.carbon !== 'incl.'
+          ? percentFromText(liveMetrics.carbon)
+          : null;
       if (cbPct === null) {
+        const extraFracs = groupFractions(
+          (lower) =>
+            !lower.includes('gemini') &&
+            !lower.includes('claude') &&
+            !lower.includes('gpt') &&
+            !lower.includes('argon')
+        );
         const carbonFracs = groupFractions((lower) => lower.includes('carbon'));
-        if (carbonFracs.length > 0) cbPct = Math.min(...carbonFracs);
+        const combinedExtra = [...carbonFracs, ...extraFracs];
+        if (combinedExtra.length > 0) cbPct = Math.min(...combinedExtra);
       }
     }
 
     const candidates = [
       gPct,
-      ...(!isFree ? [cPct, aPct, cbPct] : [])
+      ...(!isFree ? [cPct, cbPct] : [])
     ].filter((n): n is number => n !== null);
     minPct =
       candidates.length > 0
@@ -384,11 +385,13 @@ export function formatAntigravityStatusBarSummary(options: {
     const src = (liveMetrics || stale)!;
     gPct = percentFromText(src.gemini);
     cPct = !isFree ? percentFromText(src.claudeGpt) : null;
-    aPct = !isFree && !isUltra ? percentFromText(src.argon) : null;
-    cbPct = !isFree ? percentFromText(src.carbon) : null;
+    cbPct =
+      !isFree && src.carbon && src.carbon !== 'incl.'
+        ? percentFromText(src.carbon)
+        : null;
     const candidates = [
       gPct,
-      ...(!isFree ? [cPct, aPct, cbPct] : [])
+      ...(!isFree ? [cPct, cbPct] : [])
     ].filter((n): n is number => n !== null);
     if (candidates.length > 0) {
       minPct = Math.round(
@@ -400,7 +403,6 @@ export function formatAntigravityStatusBarSummary(options: {
   const parts: string[] = [];
   if (gPct !== null) parts.push(`G ${gPct}%`);
   if (!isFree && cPct !== null) parts.push(`C ${cPct}%`);
-  if (!isFree && aPct !== null) parts.push(`A ${aPct}%`);
   if (!isFree && cbPct !== null) parts.push(`Cb ${cbPct}%`);
   if (parts.length === 0 && minPct !== null) {
     parts.push(`${minPct}%`);

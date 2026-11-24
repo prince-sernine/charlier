@@ -237,7 +237,7 @@ body.vscode-high-contrast .hero-watermark, body.vscode-high-contrast-light .hero
   background: var(--surface-muted);
   color: var(--text-muted);
 }
-.claimed-tag {
+.claimed-tag, .credits-tag {
   display: inline-flex;
   align-items: center;
   flex-shrink: 0;
@@ -252,6 +252,16 @@ body.vscode-high-contrast .hero-watermark, body.vscode-high-contrast-light .hero
   font-weight: 750;
   letter-spacing: .04em;
   text-transform: uppercase;
+}
+.credits-tag {
+  letter-spacing: .02em;
+  text-transform: none;
+  font-weight: 700;
+}
+.credits-tag.balance-tag {
+  border-color: rgba(25, 185, 149, .5);
+  background: rgba(25, 185, 149, .12);
+  color: var(--quota-green-text);
 }
 .nextup-tag {
   display: inline-flex;
@@ -488,12 +498,14 @@ body.vscode-high-contrast .verify-badge,
 body.vscode-high-contrast .drawer-verify-note,
 body.vscode-high-contrast .btn-verify,
 body.vscode-high-contrast .claimed-tag,
+body.vscode-high-contrast .credits-tag,
 body.vscode-high-contrast .btn-cli-only.is-claimed,
 body.vscode-high-contrast-light .verify-banner,
 body.vscode-high-contrast-light .verify-badge,
 body.vscode-high-contrast-light .drawer-verify-note,
 body.vscode-high-contrast-light .btn-verify,
 body.vscode-high-contrast-light .claimed-tag,
+body.vscode-high-contrast-light .credits-tag,
 body.vscode-high-contrast-light .btn-cli-only.is-claimed {
   background: var(--bg-card);
   border-color: var(--quota-amber);

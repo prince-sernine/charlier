@@ -473,6 +473,261 @@ export class QuotaService {
     return live[0];
   }
 
+  private localTrajectoriesCache: {
+    port: number;
+    fetchedAt: number;
+    summaries: Record<string, any>;
+  } | null = null;
+  private foreignConvCache = new Map<string, number>();
+
+  private findLocalWindowDaemon(
+    liveDaemons?: Array<DaemonInfo & { mtime: number; filePath?: string }>
+  ): (DaemonInfo & { mtime: number; filePath?: string }) | null {
+    const localPids = this.findLocalHubPids();
+    if (localPids.size === 0) return null;
+    const live = liveDaemons ?? this.findAllLiveDaemons();
+    return live.find((d) => typeof d.pid === 'number' && localPids.has(d.pid)) || null;
+  }
+
+  private normalizeWorkspacePathForMatch(rawUriOrPath: string): string {
+    const trimmed = String(rawUriOrPath || '').trim();
+    if (!trimmed) return '';
+    let fsPath = trimmed;
+    if (/^file:\/\//i.test(trimmed)) {
+      try {
+        fsPath = vscode.Uri.parse(trimmed).fsPath || trimmed;
+      } catch {
+        fsPath = decodeURIComponent(trimmed.replace(/^file:\/\//i, ''));
+      }
+      if (process.platform === 'win32' && /^\/[a-zA-Z]:/.test(fsPath)) {
+        fsPath = fsPath.slice(1);
+      }
+    }
+    const resolved = path.resolve(fsPath).replace(/[\\/]+$/, '');
+    return process.platform === 'win32' || process.platform === 'darwin'
+      ? resolved.toLowerCase()
+      : resolved;
+  }
+
+  private getLocalWorkspacePaths(): Set<string> {
+    const out = new Set<string>();
+    const folders = vscode.workspace?.workspaceFolders || [];
+    for (const folder of folders) {
+      const p = folder?.uri?.fsPath || folder?.uri?.path || '';
+      if (p) {
+        const norm = this.normalizeWorkspacePathForMatch(p);
+        if (norm) out.add(norm);
+      }
+    }
+    return out;
+  }
+
+  private trajectoryMatchesLocalWorkspaces(
+    summary: any,
+    localWorkspacePaths: Set<string>
+  ): boolean {
+    if (localWorkspacePaths.size === 0) return false;
+    const workspaces = [
+      ...(Array.isArray(summary?.workspaces) ? summary.workspaces : []),
+      ...(Array.isArray(summary?.trajectoryMetadata?.workspaces)
+        ? summary.trajectoryMetadata.workspaces
+        : [])
+    ];
+    for (const ws of workspaces) {
+      for (const raw of [ws?.workspaceFolderAbsoluteUri, ws?.gitRootAbsoluteUri]) {
+        if (typeof raw === 'string' && raw.trim()) {
+          const norm = this.normalizeWorkspacePathForMatch(raw);
+          if (norm && localWorkspacePaths.has(norm)) {
+            return true;
+          }
+        }
+      }
+    }
+    return false;
+  }
+
+  private async fetchCascadeTrajectoriesForDaemon(
+    daemon: DaemonInfo,
+    bypassCache = false
+  ): Promise<Record<string, any> | null> {
+    const now = Date.now();
+    if (
+      !bypassCache &&
+      this.localTrajectoriesCache &&
+      this.localTrajectoriesCache.port === daemon.httpPort &&
+      now - this.localTrajectoriesCache.fetchedAt < 1500
+    ) {
+      return this.localTrajectoriesCache.summaries;
+    }
+
+    const res = await this.queryDaemonRpcWithMeta<any>(
+      daemon,
+      '/exa.language_server_pb.LanguageServerService/GetAllCascadeTrajectories',
+      {},
+      250
+    );
+    const hasGrpcError = Boolean(res.grpcStatus && res.grpcStatus !== '0');
+    if (
+      res.status !== 200 ||
+      hasGrpcError ||
+      !res.data ||
+      typeof res.data.trajectorySummaries !== 'object'
+    ) {
+      return null;
+    }
+
+    const summaries = res.data.trajectorySummaries || {};
+    this.localTrajectoriesCache = {
+      port: daemon.httpPort,
+      fetchedAt: Date.now(),
+      summaries
+    };
+    return summaries;
+  }
+
+  /**
+   * Verifies that a filesystem event under `~/.gemini/antigravity*{conversations,annotations}`
+   * actually belongs to THIS IDE window's own Antigravity daemon/workspace rather than a
+   * sibling VS Code / Antigravity window sharing the global `~/.gemini` directory.
+   */
+  public async isAntigravityActivityOwnedByWindow(info?: {
+    dirKind: 'conversations' | 'annotations';
+    conversationIds: string[];
+  }): Promise<boolean> {
+    const dirKind = info?.dirKind || 'conversations';
+    const convIds = Array.isArray(info?.conversationIds)
+      ? info!.conversationIds.filter(Boolean)
+      : [];
+
+    const liveDaemons = this.findAllLiveDaemons();
+    const localDaemon = this.findLocalWindowDaemon(liveDaemons);
+
+    // No daemons running anywhere on disk (standalone CLI or unit harness):
+    // ignore annotations-only metadata noise, allow genuine conversation writes.
+    if (liveDaemons.length === 0 && !localDaemon) {
+      return dirKind === 'conversations';
+    }
+
+    const evaluateSummaries = (
+      summaries: Record<string, any>,
+      requireWorkspaceMatch: boolean,
+      localWorkspacePaths: Set<string>
+    ): boolean => {
+      const now = Date.now();
+      const isActiveOrFresh = (entry: any): boolean => {
+        if (!entry || typeof entry !== 'object') return false;
+        if (String(entry.status || '').toUpperCase().includes('RUNNING')) {
+          return true;
+        }
+        const modMs = entry.lastModifiedTime ? Date.parse(entry.lastModifiedTime) : NaN;
+        return Number.isFinite(modMs) && now - modMs <= 5000;
+      };
+
+      if (convIds.length > 0) {
+        for (const id of convIds) {
+          const entry = summaries[id];
+          if (!entry) continue;
+          if (
+            requireWorkspaceMatch &&
+            !this.trajectoryMatchesLocalWorkspaces(entry, localWorkspacePaths)
+          ) {
+            continue;
+          }
+          // Annotations-only touches (e.g. background indexing on window startup) only count
+          // if the trajectory is actively running or just modified in this window.
+          if (dirKind === 'annotations' && !isActiveOrFresh(entry)) {
+            continue;
+          }
+          return true;
+        }
+        return false;
+      }
+
+      // OS watcher omitted filename (macOS/Linux edge case): only claim ownership when
+      // THIS window has a running or freshly modified trajectory.
+      for (const entry of Object.values(summaries)) {
+        if (
+          requireWorkspaceMatch &&
+          !this.trajectoryMatchesLocalWorkspaces(entry, localWorkspacePaths)
+        ) {
+          continue;
+        }
+        if (isActiveOrFresh(entry)) {
+          return true;
+        }
+      }
+      return false;
+    };
+
+    if (localDaemon) {
+      const now = Date.now();
+      if (convIds.length > 0) {
+        const allRecentlyForeign = convIds.every((id) => {
+          const seenAt = this.foreignConvCache.get(`${localDaemon.httpPort}:${id}`);
+          return typeof seenAt === 'number' && now - seenAt < 1500;
+        });
+        if (allRecentlyForeign) {
+          return false;
+        }
+      }
+      // Bypass short cache if an unknown UUID arrives so brand-new turns register immediately
+      const cachedHasAll =
+        convIds.length > 0 &&
+        this.localTrajectoriesCache?.port === localDaemon.httpPort &&
+        convIds.some((id) => Boolean(this.localTrajectoriesCache?.summaries?.[id]));
+      const summaries = await this.fetchCascadeTrajectoriesForDaemon(
+        localDaemon,
+        !cachedHasAll || dirKind === 'annotations'
+      );
+      if (summaries) {
+        const owned = evaluateSummaries(summaries, false, new Set());
+        if (!owned && convIds.length > 0) {
+          for (const id of convIds) {
+            if (!summaries[id]) {
+              this.foreignConvCache.set(`${localDaemon.httpPort}:${id}`, Date.now());
+            }
+          }
+          if (this.foreignConvCache.size > 64) {
+            this.foreignConvCache.clear();
+          }
+        }
+        return owned;
+      }
+      // Graceful fallback for older `agy` binaries lacking GetAllCascadeTrajectories
+      return dirKind === 'conversations';
+    }
+
+    // Live Antigravity daemons exist on disk, but THIS Extension Host owns NONE of them.
+    // In standard VS Code (`google.google-antigravity` spawns `agy` inside the Extension Host),
+    // that proves the file write came from another window or CLI.
+    const isAntigravityIdeHost = (vscode.env?.appName || '')
+      .toLowerCase()
+      .includes('antigravity');
+    if (!isAntigravityIdeHost) {
+      return false;
+    }
+
+    // In Antigravity IDE, if the host spawned `agy` outside the Extension Host process,
+    // verify ownership via workspace URI matching against host-scoped daemons.
+    const localWorkspacePaths = this.getLocalWorkspacePaths();
+    if (localWorkspacePaths.size === 0) {
+      return false;
+    }
+    const targetDirs = new Set(
+      this.resolveHostScopedDaemonDirs().map((dir) => path.resolve(dir).toLowerCase())
+    );
+    const hostDaemons = liveDaemons.filter((d) =>
+      d.filePath ? targetDirs.has(path.resolve(path.dirname(d.filePath)).toLowerCase()) : false
+    );
+    for (const daemon of hostDaemons) {
+      const summaries = await this.fetchCascadeTrajectoriesForDaemon(daemon, true);
+      if (summaries && evaluateSummaries(summaries, true, localWorkspacePaths)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   private findLocalHubPids(): Set<number> {
     const pids = new Set<number>();
     const getHandles = (process as any)._getActiveHandles;
@@ -584,12 +839,12 @@ export class QuotaService {
 
     this.invalidate();
 
-    // Poll in the background for up to 6.5s so as soon as AntigravityServerManager's
+    // Poll in the background for up to 8s so as soon as AntigravityServerManager's
     // recovery backoff spawns the new `agy --hub` and binds its gRPC port, we pull live quota.
     (async () => {
       try {
         const start = Date.now();
-        while (Date.now() - start < 6500) {
+        while (Date.now() - start < 8000) {
           await new Promise((r) => setTimeout(r, 220));
           const updatedLocalPids = hadLocalHandles ? this.findLocalHubPids() : new Set<number>();
           const candidates = this.findAllLiveDaemons().filter((d) => {
@@ -619,6 +874,82 @@ export class QuotaService {
     return 'respawned';
   }
 
+  /**
+   * Zero-Kill In-Place Antigravity Session Hydration:
+   * Invokes `LanguageServerService/HasAuthToken` (~10-20ms) on the running `agy --hub`
+   * daemon after OS Keyring / disk credentials are swapped. Inside `agy`, `HasAuthToken`
+   * has no cache lookup and synchronously triggers `(*AuthClient).syncWithStoredToken()` ->
+   * `applyStoredToken()` -> `(*CodeAssistClient).TokenChanged()` + `ResetCaches()` in place
+   * with zero `SIGTERM` kills, zero 10-minute `AUTO_RECOVER_MAX_ATTEMPTS` budget burn, and
+   * zero Extension Host restarts. Triggers `antigravity.reconnect` immediately after
+   * `HasAuthToken` succeeds (avoiding the ~4s `GetAuthStatus` RPC stall and ~1s cold
+   * `GetUserStatus` wait), then verifies identity via `GetUserStatus` and falls back to
+   * `respawnActiveDaemon()` only if the daemon stayed on the old account.
+   */
+  public async hydrateActiveDaemonInPlace(
+    expectedEmail: string,
+    onHydrated?: () => void
+  ): Promise<'hydrated' | 'not-running' | 'needs-respawn'> {
+    const daemon = this.findActiveDaemon();
+    if (!daemon) {
+      this.invalidate();
+      return 'not-running';
+    }
+    const targetLower = (expectedEmail || '').trim().toLowerCase();
+    if (!targetLower || targetLower === 'unknown') {
+      return 'needs-respawn';
+    }
+
+    const hasTokenRes = await this.queryDaemonRpcWithMeta<any>(
+      daemon,
+      '/exa.language_server_pb.LanguageServerService/HasAuthToken',
+      {},
+      1000
+    );
+    const grpcOk = !hasTokenRes.grpcStatus || hasTokenRes.grpcStatus === '0';
+    if (
+      hasTokenRes.status !== 200 ||
+      !grpcOk ||
+      !hasTokenRes.data ||
+      hasTokenRes.data.hasToken === false
+    ) {
+      return 'needs-respawn';
+    }
+
+    // `HasAuthToken` completes `syncWithStoredToken()` + `ResetCaches()` before returning 200.
+    // Trigger sidebar refresh immediately (~15-20ms) so Antigravity flips right alongside Cockpit
+    // instead of waiting on outbound `GetAuthStatus` (~4s) or cold `GetUserStatus` (~700-1200ms).
+    this.invalidate();
+    try {
+      Promise.resolve(
+        vscode.commands?.executeCommand?.('antigravity.reconnect')
+      ).catch(() => {});
+    } catch {}
+
+    const delays = [0, 120];
+    for (const waitMs of delays) {
+      if (waitMs > 0) {
+        await new Promise((r) => setTimeout(r, waitMs));
+      }
+      const statusMeta = await this.queryDaemonRpcWithMeta<any>(
+        daemon,
+        '/exa.language_server_pb.LanguageServerService/GetUserStatus',
+        {},
+        1500
+      );
+      if (statusMeta.status !== 200) continue;
+      const reportedEmail = (statusMeta.data?.userStatus?.email || '').trim().toLowerCase();
+      const valInfo = extractGoogleValidationInfo(statusMeta.data || statusMeta);
+      const valEmail = (valInfo.emailFromUrl || '').trim().toLowerCase();
+      if (reportedEmail === targetLower || (valEmail && valEmail === targetLower)) {
+        onHydrated?.();
+        return 'hydrated';
+      }
+    }
+
+    return 'needs-respawn';
+  }
+
   private queryDaemonRpcWithMeta<T>(
     daemon: DaemonInfo,
     rpcPath: string,
@@ -632,141 +963,151 @@ export class QuotaService {
     frame.writeUInt32BE(payloadBuf.length, 1);
     payloadBuf.copy(frame, 5);
 
-    return new Promise((resolve) => {
-      const req = http.request(
-        {
-          hostname: '127.0.0.1',
-          port: daemon.httpPort,
-          path: rpcPath,
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/grpc-web+json',
-            'X-Grpc-Web': '1',
-            'x-codeium-csrf-token': daemon.csrfToken,
-            'Content-Length': frame.length
+    const attemptHost = (hostname: string): Promise<DaemonRpcResult<T> & { connError?: boolean }> =>
+      new Promise((resolve) => {
+        const req = http.request(
+          {
+            hostname,
+            port: daemon.httpPort,
+            path: rpcPath,
+            method: 'POST',
+            agent: false,
+            headers: {
+              'Content-Type': 'application/grpc-web+json',
+              'X-Grpc-Web': '1',
+              'x-codeium-csrf-token': daemon.csrfToken,
+              'Content-Length': frame.length
+            },
+            timeout: timeoutMs
           },
-          timeout: timeoutMs
-        },
-        (res) => {
-          const status = res.statusCode || 0;
-          const headerGrpcStatus =
-            typeof res.headers['grpc-status'] === 'string'
-              ? res.headers['grpc-status']
-              : undefined;
-          let headerGrpcMessage =
-            typeof res.headers['grpc-message'] === 'string'
-              ? res.headers['grpc-message']
-              : undefined;
-          if (headerGrpcMessage) {
-            try {
-              headerGrpcMessage = decodeURIComponent(headerGrpcMessage);
-            } catch {}
-          }
-
-          const chunks: Buffer[] = [];
-          res.on('data', (c: Buffer) => chunks.push(c));
-          res.on('end', () => {
-            const full = Buffer.concat(chunks);
-            let offset = 0;
-            let rawJson = '';
-            let trailerText = '';
-
-            if (full.length > 0 && (full[0] === 0x7b || status !== 200)) {
-              const asText = full.toString('utf8');
-              if (status === 200 && full[0] === 0x7b) {
-                rawJson = asText;
-              } else {
-                trailerText = asText;
-              }
-            } else {
-              while (offset + 5 <= full.length) {
-                const flags = full.readUInt8(offset);
-                const len = full.readUInt32BE(offset + 1);
-                offset += 5;
-                if (offset + len > full.length) break;
-                const data = full.subarray(offset, offset + len);
-                offset += len;
-                if (flags === 0) {
-                  rawJson = data.toString('utf8');
-                } else if ((flags & 0x80) !== 0) {
-                  trailerText += data.toString('utf8') + '\n';
-                }
-              }
+          (res) => {
+            const status = res.statusCode || 0;
+            const headerGrpcStatus =
+              typeof res.headers['grpc-status'] === 'string'
+                ? res.headers['grpc-status']
+                : undefined;
+            let headerGrpcMessage =
+              typeof res.headers['grpc-message'] === 'string'
+                ? res.headers['grpc-message']
+                : undefined;
+            if (headerGrpcMessage) {
+              try {
+                headerGrpcMessage = decodeURIComponent(headerGrpcMessage);
+              } catch {}
             }
 
-            let grpcStatus = headerGrpcStatus;
-            let grpcMessage = headerGrpcMessage;
-            if (trailerText) {
-              for (const line of trailerText.split(/\r?\n/)) {
-                const lower = line.toLowerCase();
-                if (lower.startsWith('grpc-status:')) {
-                  grpcStatus = line.slice('grpc-status:'.length).trim();
-                } else if (lower.startsWith('grpc-message:')) {
-                  const rawMsg = line.slice('grpc-message:'.length).trim();
-                  try {
-                    grpcMessage = decodeURIComponent(rawMsg);
-                  } catch {
-                    grpcMessage = rawMsg;
+            const chunks: Buffer[] = [];
+            res.on('data', (c: Buffer) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
+            res.on('end', () => {
+              const full = Buffer.concat(chunks);
+              let offset = 0;
+              let rawJson = '';
+              let trailerText = '';
+
+              if (full.length > 0 && (full[0] === 0x7b || status !== 200)) {
+                const asText = full.toString('utf8');
+                if (status === 200 && full[0] === 0x7b) {
+                  rawJson = asText;
+                } else {
+                  trailerText = asText;
+                }
+              } else {
+                while (offset + 5 <= full.length) {
+                  const flags = full.readUInt8(offset);
+                  const len = full.readUInt32BE(offset + 1);
+                  offset += 5;
+                  if (offset + len > full.length) break;
+                  const data = full.subarray(offset, offset + len);
+                  offset += len;
+                  if (flags === 0) {
+                    rawJson = data.toString('utf8');
+                  } else if ((flags & 0x80) !== 0) {
+                    trailerText += data.toString('utf8') + '\n';
                   }
                 }
               }
-            }
 
-            if (status !== 200) {
-              let parsedErr: any = null;
+              let grpcStatus = headerGrpcStatus;
+              let grpcMessage = headerGrpcMessage;
+              if (trailerText) {
+                for (const line of trailerText.split(/\r?\n/)) {
+                  const lower = line.toLowerCase();
+                  if (lower.startsWith('grpc-status:')) {
+                    grpcStatus = line.slice('grpc-status:'.length).trim();
+                  } else if (lower.startsWith('grpc-message:')) {
+                    const rawMsg = line.slice('grpc-message:'.length).trim();
+                    try {
+                      grpcMessage = decodeURIComponent(rawMsg);
+                    } catch {
+                      grpcMessage = rawMsg;
+                    }
+                  }
+                }
+              }
+
+              if (status !== 200) {
+                let parsedErr: any = null;
+                try {
+                  parsedErr = JSON.parse(trailerText);
+                } catch {}
+                resolve({
+                  status,
+                  data: parsedErr,
+                  grpcStatus,
+                  grpcMessage: grpcMessage || trailerText,
+                  rawErrorText: trailerText
+                });
+                return;
+              }
+
+              if (!rawJson) {
+                resolve({
+                  status,
+                  data: null,
+                  grpcStatus,
+                  grpcMessage,
+                  rawErrorText: trailerText || grpcMessage
+                });
+                return;
+              }
+
               try {
-                parsedErr = JSON.parse(trailerText);
-              } catch {}
-              resolve({
-                status,
-                data: parsedErr,
-                grpcStatus,
-                grpcMessage: grpcMessage || trailerText,
-                rawErrorText: trailerText
-              });
-              return;
-            }
+                resolve({
+                  status,
+                  data: JSON.parse(rawJson),
+                  grpcStatus,
+                  grpcMessage,
+                  rawErrorText: trailerText || undefined
+                });
+              } catch {
+                resolve({
+                  status,
+                  data: null,
+                  grpcStatus,
+                  grpcMessage,
+                  rawErrorText: rawJson
+                });
+              }
+            });
+          }
+        );
 
-            if (!rawJson) {
-              resolve({
-                status,
-                data: null,
-                grpcStatus,
-                grpcMessage,
-                rawErrorText: trailerText || grpcMessage
-              });
-              return;
-            }
+        req.on('error', () => resolve({ status: 0, data: null, connError: true }));
+        req.on('timeout', () => {
+          req.destroy();
+          resolve({ status: 0, data: null });
+        });
 
-            try {
-              resolve({
-                status,
-                data: JSON.parse(rawJson),
-                grpcStatus,
-                grpcMessage,
-                rawErrorText: trailerText || undefined
-              });
-            } catch {
-              resolve({
-                status,
-                data: null,
-                grpcStatus,
-                grpcMessage,
-                rawErrorText: rawJson
-              });
-            }
-          });
-        }
-      );
-
-      req.on('error', () => resolve({ status: 0, data: null }));
-      req.on('timeout', () => {
-        req.destroy();
-        resolve({ status: 0, data: null });
+        req.write(frame);
+        req.end();
       });
 
-      req.write(frame);
-      req.end();
+    return attemptHost('127.0.0.1').then((first) => {
+      if (first.connError) {
+        return attemptHost('::1').then(({ connError: _c, ...rest }) => rest);
+      }
+      const { connError: _c, ...rest } = first;
+      return rest;
     });
   }
 
@@ -1022,15 +1363,22 @@ export class QuotaService {
 
     const groups: QuotaGroup[] = quotaRes?.response?.groups || [];
     const hasArgonGroup = groups.some(
-      (g) =>
-        (g.displayName && g.displayName.toLowerCase().includes('argon')) ||
-        (g.description && g.description.toLowerCase().includes('argon'))
+      (g) => g.displayName && g.displayName.toLowerCase().includes('argon')
     );
+    const hasPaidQuotaSignal =
+      hasArgonGroup ||
+      groups.some((g) => {
+        const lower = (g.displayName || '').toLowerCase();
+        if (lower.includes('claude') || lower.includes('gpt')) {
+          return (g.buckets || []).some((b) => b.window === '5h' && !b.disabled);
+        }
+        return lower.includes('carbon');
+      });
 
     const planInfo = statusRes?.userStatus?.planStatus?.planInfo;
     const userTier = statusRes?.userStatus?.userTier;
 
-    const planTier = this.resolvePlanTier(userTier, planInfo, hasArgonGroup);
+    const planTier = this.resolvePlanTier(userTier, planInfo, hasPaidQuotaSignal);
 
     const tier: QuotaSummary['tier'] =
       planTier === 'ULTRA'
@@ -1092,9 +1440,10 @@ export class QuotaService {
           timeout: 5000
         },
         (res) => {
-          let data = '';
-          res.on('data', (c) => (data += c));
+          const chunks: Buffer[] = [];
+          res.on('data', (c: Buffer) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
           res.on('end', () => {
+            const data = Buffer.concat(chunks).toString('utf8');
             const status = res.statusCode || 0;
             if (status !== 200) {
               let errorCode: string | undefined;
@@ -1143,6 +1492,16 @@ export class QuotaService {
     });
   }
 
+  private getAntigravityHttpUserAgent(): string {
+    const osToken =
+      process.platform === 'darwin'
+        ? 'Macintosh; Intel Mac OS X 10_15_7'
+        : process.platform === 'linux'
+          ? 'X11; Linux x86_64'
+          : 'Windows NT 10.0; Win64; x64';
+    return `Mozilla/5.0 (${osToken}) Antigravity/1.13.0`;
+  }
+
   private postCloudCodeJson<T>(
     accessToken: string,
     endpointPath: string,
@@ -1158,15 +1517,16 @@ export class QuotaService {
           headers: {
             Authorization: `Bearer ${accessToken}`,
             'Content-Type': 'application/json',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Antigravity/1.11.0',
+            'User-Agent': this.getAntigravityHttpUserAgent(),
             'Content-Length': Buffer.byteLength(payload)
           },
           timeout: 5000
         },
         (res) => {
-          let raw = '';
-          res.on('data', (c) => (raw += c));
+          const chunks: Buffer[] = [];
+          res.on('data', (c: Buffer) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
           res.on('end', () => {
+            const raw = Buffer.concat(chunks).toString('utf8');
             const status = res.statusCode || 0;
             try {
               resolve({ status, data: JSON.parse(raw) as T });
@@ -1199,14 +1559,15 @@ export class QuotaService {
           method: 'GET',
           headers: {
             Authorization: `Bearer ${accessToken}`,
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Antigravity/1.11.0'
+            'User-Agent': this.getAntigravityHttpUserAgent()
           },
           timeout: 5000
         },
         (res) => {
-          let raw = '';
-          res.on('data', (c) => (raw += c));
+          const chunks: Buffer[] = [];
+          res.on('data', (c: Buffer) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
           res.on('end', () => {
+            const raw = Buffer.concat(chunks).toString('utf8');
             const status = res.statusCode || 0;
             try {
               resolve({ status, data: JSON.parse(raw) as T });
@@ -1394,20 +1755,59 @@ export class QuotaService {
             ? loadRes.data.cloudaicompanionProject.id.trim()
             : null) || 'aicode-consumers';
 
-      const [modelsRes, quotaRes] = await Promise.all([
+      // RetrieveUserQuotaSummaryRequest and FetchAvailableModelsRequest protos accept
+      // `{ project }` without `metadata` (sending `metadata` triggers HTTP 400 / empty `{}`).
+      let [modelsRes, quotaRes] = await Promise.all([
         this.postCloudCodeJson<any>(accessToken, '/v1internal:fetchAvailableModels', {
-          project: resolvedProject,
-          metadata: clientMetadata
+          project: resolvedProject
         }),
         this.postCloudCodeJson<any>(
           accessToken,
           '/v1internal:retrieveUserQuotaSummary',
           {
-            project: resolvedProject,
-            metadata: clientMetadata
+            project: resolvedProject
           }
         )
       ]);
+
+      if (
+        (quotaRes.status === 401 || modelsRes.status === 401) &&
+        !usedMintedToken &&
+        !isClaimed &&
+        refreshToken
+      ) {
+        const remint = await this.mintAccessTokenFromRefresh(refreshToken);
+        if (remint.ok && remint.access_token) {
+          accessToken = remint.access_token;
+          usedMintedToken = true;
+          vault.updateInactiveProfileToken(
+            profile.id,
+            remint.access_token,
+            remint.expires_in || 3599
+          );
+          [modelsRes, quotaRes] = await Promise.all([
+            this.postCloudCodeJson<any>(accessToken, '/v1internal:fetchAvailableModels', {
+              project: resolvedProject
+            }),
+            this.postCloudCodeJson<any>(
+              accessToken,
+              '/v1internal:retrieveUserQuotaSummary',
+              {
+                project: resolvedProject
+              }
+            )
+          ]);
+        } else if (!remint.ok && remint.revoked) {
+          vault.updateProfileAuthHealth(profile.id, {
+            authStatus: 'revoked',
+            authErrorCode: remint.errorCode,
+            authErrorMessage: remint.errorMessage,
+            authCheckedAt: Date.now()
+          });
+          this.lastInactiveRefreshTime.set(profile.id, Date.now());
+          return profile.cachedQuota || null;
+        }
+      }
 
       const quotaValInfo = extractGoogleValidationInfo(quotaRes.data);
       const modelsValInfo = extractGoogleValidationInfo(modelsRes.data);
@@ -1433,12 +1833,44 @@ export class QuotaService {
         (licenseEntry?.userTier
           ? { id: String(licenseEntry.userTier), name: String(licenseEntry.tierDisplayName || '') }
           : undefined);
+      const hasPaid3p5h = Boolean(
+        quotaRes.status === 200 &&
+          Array.isArray(quotaRes.data?.groups) &&
+          quotaRes.data.groups.some((g: any) => {
+            const lower = String(g?.displayName || '').toLowerCase();
+            return (
+              (lower.includes('claude') || lower.includes('gpt')) &&
+              Array.isArray(g?.buckets) &&
+              g.buckets.some((b: any) => b?.window === '5h' && !b?.disabled)
+            );
+          })
+      );
+
+      if (
+        loadRes.status !== 200 &&
+        licensesRes.status !== 200 &&
+        modelsRes.status !== 200 &&
+        quotaRes.status !== 200
+      ) {
+        // Offline, timeout, or transient upstream outage across all Cloud Code endpoints:
+        // keep last verified snapshot and auth state intact rather than wiping to FREE / 'ok'.
+        return profile.cachedQuota || null;
+      }
+
+      const fallbackCachedPlan =
+        !paidTier &&
+        loadRes.status !== 200 &&
+        licensesRes.status !== 200 &&
+        profile.cachedQuota?.plan &&
+        profile.cachedQuota.plan !== '--'
+          ? (profile.cachedQuota.plan as UserPlanTier)
+          : undefined;
 
       const planTier = this.resolvePlanTier(
         paidTier,
         undefined,
-        false,
-        profile.planOverride
+        hasPaid3p5h,
+        profile.planOverride || fallbackCachedPlan
       );
 
       // 1. Extract Gemini 5h pool from fetchAvailableModels & preserve/auto-heal 7d pool
@@ -1448,11 +1880,15 @@ export class QuotaService {
       const modelsDict = modelsRes.data?.models;
       if (modelsDict && typeof modelsDict === 'object') {
         const preferredKeys = [
-          'gemini-3.8-flash-tiered',
-          'gemini-3.8-flash',
+          'gemini-4-hydrogen-sonar',
+          'gemini-4-hydrogen',
+          'gemini-4-neon',
+          'gemini-4-carbon',
           'gemini-3-flash',
           'gemini-2.5-pro',
-          'gemini-2.5-flash'
+          'gemini-2.5-flash',
+          'gemini-3.8-flash-tiered',
+          'gemini-3.8-flash'
         ];
         let foundQuota: any = null;
         for (const k of preferredKeys) {
@@ -1466,8 +1902,9 @@ export class QuotaService {
             const lowerKey = k.toLowerCase();
             if (
               lowerKey.includes('gemini') &&
+              !lowerKey.startsWith('tab_') &&
+              !lowerKey.includes('image') &&
               !lowerKey.includes('argon') &&
-              !lowerKey.includes('carbon') &&
               v?.quotaInfo
             ) {
               foundQuota = v.quotaInfo;
@@ -1611,6 +2048,20 @@ export class QuotaService {
               upstreamGemini7d = `${pctWk}%`;
               upstreamGemini7dReset = bWk?.resetTime ? String(bWk.resetTime) : undefined;
             }
+          } else if (planTier !== 'FREE' && !upstreamCarbon) {
+            const buckets: any[] = g.buckets || [];
+            const b5h = buckets.find((x: any) => x.window === '5h');
+            const bWk = buckets.find((x: any) => x.window === 'weekly') || buckets[0];
+            const p5 = b5h && !b5h.disabled ? percentFromFraction(b5h.remainingFraction) : null;
+            const pW = bWk && !bWk.disabled ? percentFromFraction(bWk.remainingFraction) : null;
+            const known = [p5, pW].filter((x): x is number => x !== null);
+            if (known.length > 0) {
+              upstreamCarbon = `${Math.min(...known)}%`;
+              upstreamCarbonReset =
+                p5 !== null && (pW === null || p5 < pW)
+                  ? b5h?.resetTime
+                  : bWk?.resetTime || b5h?.resetTime;
+            }
           }
         }
       }
@@ -1644,49 +2095,13 @@ export class QuotaService {
         geminiReset = gemini7dReset;
       }
 
-      // 3. Resolve Argon & Carbon representation & auto-heal expired weekly resets
-      let argon = '--';
-      let argonReset = profile.cachedQuota?.argonReset;
-      if (planTier === 'ULTRA') {
-        argon = 'incl.';
-        argonReset = undefined;
-      } else if (planTier === 'PRO') {
-        if (upstreamArgon) {
-          argon = upstreamArgon;
-          argonReset = upstreamArgonReset;
-        } else if (this.isResetExpired(argonReset)) {
-          argon = '100%';
-          argonReset = undefined;
-        } else {
-          const prevArgon = profile.cachedQuota?.argon;
-          argon = prevArgon && prevArgon !== 'incl.' ? prevArgon : '--';
-        }
-      } else {
-        argonReset = undefined;
-      }
-
-      let carbon: string | undefined = profile.cachedQuota?.carbon;
-      let carbonReset: string | undefined = profile.cachedQuota?.carbonReset;
-      if (planTier === 'ULTRA') {
-        carbon = upstreamCarbon || 'incl.';
-        carbonReset = upstreamCarbon ? upstreamCarbonReset : undefined;
-      } else if (planTier === 'PRO') {
-        if (upstreamCarbon) {
-          carbon = upstreamCarbon;
-          carbonReset = upstreamCarbonReset;
-        } else if (carbon && carbon !== 'incl.') {
-          if (this.isResetExpired(carbonReset)) {
-            carbon = '100%';
-            carbonReset = undefined;
-          }
-        } else {
-          carbon = undefined;
-          carbonReset = undefined;
-        }
-      } else {
-        carbon = undefined;
-        carbonReset = undefined;
-      }
+      // 3. Clean 2-pool persistence: Argon is retired & Carbon is unified inside Gemini;
+      // surface standalone `carbon` only if Google explicitly returns a separate group upstream.
+      const argon = '--';
+      const carbon: string | undefined =
+        planTier !== 'FREE' && upstreamCarbon ? upstreamCarbon : undefined;
+      const carbonReset: string | undefined =
+        carbon && upstreamCarbonReset ? upstreamCarbonReset : undefined;
 
       const metric: CachedQuotaMetric = {
         plan: planTier,
@@ -1704,7 +2119,6 @@ export class QuotaService {
         ...(claude7dReset ? { claude7dReset } : {}),
         ...(geminiReset ? { geminiReset } : {}),
         ...(claudeReset ? { claudeReset } : {}),
-        ...(argonReset ? { argonReset } : {}),
         ...(carbonReset ? { carbonReset } : {}),
         updatedAt: Date.now()
       };
@@ -1742,8 +2156,12 @@ export class QuotaService {
   ): Promise<boolean> {
     const now = Date.now();
     const profiles = vault.listProfiles();
-    const activeProfile = activeEmail
-      ? profiles.find((p) => p.email.toLowerCase() === activeEmail.toLowerCase()) || null
+    const diskLiveEmail = vault.getLiveSessionInfo().email;
+    const effectiveActiveEmail =
+      activeEmail ||
+      (diskLiveEmail && diskLiveEmail !== 'Unknown' ? diskLiveEmail : null);
+    const activeProfile = effectiveActiveEmail
+      ? profiles.find((p) => p.email.toLowerCase() === effectiveActiveEmail.toLowerCase()) || null
       : activeProfileId
         ? profiles.find((p) => p.id === activeProfileId) || null
         : null;
@@ -1754,14 +2172,20 @@ export class QuotaService {
     });
 
     const tasks: Array<Promise<unknown>> = [
-      this.refreshAllInactiveProfiles(staleProfiles, activeEmail, activeProfileId, vault, true)
+      this.refreshAllInactiveProfiles(
+        staleProfiles,
+        effectiveActiveEmail,
+        activeProfile?.id || activeProfileId,
+        vault,
+        true
+      )
     ];
 
     const activeRecentCheck = Math.max(
       this.activeAuthHealth?.checkedAt || 0,
       activeProfile?.authCheckedAt || 0
     );
-    if ((activeProfile || activeEmail) && now - activeRecentCheck >= 30_000) {
+    if ((activeProfile || effectiveActiveEmail) && now - activeRecentCheck >= 30_000) {
       tasks.push(
         (async () => {
           const liveRt = await vault.getActiveSessionRefreshTokenAsync();
@@ -1769,7 +2193,7 @@ export class QuotaService {
             ? vault.getProfileRefreshToken(activeProfile.id)
             : null;
           const rt = liveRt || storedRt;
-          const targetEmail = activeProfile?.email || activeEmail || '';
+          const targetEmail = activeProfile?.email || effectiveActiveEmail || '';
           if (!rt) {
             if (
               activeProfile?.authStatus === 'unverified' ||
@@ -1981,8 +2405,8 @@ export class QuotaService {
     const plan = planOverride || quota.planTier || 'FREE';
     let gemini = '--';
     let claudeGpt = '--';
-    let argon = plan === 'ULTRA' ? 'incl.' : '--';
-    let carbon: string | undefined = plan === 'ULTRA' ? 'incl.' : undefined;
+    const argon = '--';
+    let carbon: string | undefined;
     let gemini5h: string | undefined;
     let gemini5hReset: string | undefined;
     let gemini7d: string | undefined;
@@ -1993,20 +2417,13 @@ export class QuotaService {
     let claude7dReset: string | undefined;
     let geminiReset: string | undefined;
     let claudeReset: string | undefined;
-    let argonReset: string | undefined;
     let carbonReset: string | undefined;
 
     for (const group of quota.groups) {
       const name = group.displayName.toLowerCase();
       if (name.includes('argon')) {
-        const b = group.buckets[0];
-        if (b) {
-          const pct = b.disabled ? null : percentFromFraction(b.remainingFraction);
-          if (pct !== null) {
-            argon = plan === 'FREE' ? '--' : `${pct}%`;
-            if (b.resetTime) argonReset = b.resetTime;
-          }
-        }
+        // Gemini 4 Argon is retired and merged into the unified Gemini pool.
+        continue;
       } else if (name.includes('carbon')) {
         const b5h = group.buckets.find((b) => b.window === '5h');
         const bWk =
@@ -2014,8 +2431,8 @@ export class QuotaService {
         const p5 = b5h && !b5h.disabled ? percentFromFraction(b5h.remainingFraction) : null;
         const pW = bWk && !bWk.disabled ? percentFromFraction(bWk.remainingFraction) : null;
         const knownCarbon = [p5, pW].filter((p): p is number => p !== null);
-        if (knownCarbon.length > 0) {
-          carbon = plan === 'FREE' ? '--' : `${Math.min(...knownCarbon)}%`;
+        if (knownCarbon.length > 0 && plan !== 'FREE') {
+          carbon = `${Math.min(...knownCarbon)}%`;
           carbonReset =
             p5 !== null && (pW === null || p5 < pW)
               ? b5h?.resetTime || bWk?.resetTime
@@ -2084,6 +2501,20 @@ export class QuotaService {
             ? b5h?.resetTime || bWeekly?.resetTime
             : bWeekly?.resetTime || b5h?.resetTime;
         }
+      } else if (plan !== 'FREE' && !carbon) {
+        const b5h = group.buckets.find((b) => b.window === '5h');
+        const bWk =
+          group.buckets.find((b) => b.window === 'weekly') || group.buckets[0];
+        const p5 = b5h && !b5h.disabled ? percentFromFraction(b5h.remainingFraction) : null;
+        const pW = bWk && !bWk.disabled ? percentFromFraction(bWk.remainingFraction) : null;
+        const knownExtra = [p5, pW].filter((p): p is number => p !== null);
+        if (knownExtra.length > 0) {
+          carbon = `${Math.min(...knownExtra)}%`;
+          carbonReset =
+            p5 !== null && (pW === null || p5 < pW)
+              ? b5h?.resetTime || bWk?.resetTime
+              : bWk?.resetTime || b5h?.resetTime;
+        }
       }
     }
 
@@ -2103,7 +2534,6 @@ export class QuotaService {
       ...(claude7dReset ? { claude7dReset } : {}),
       ...(geminiReset ? { geminiReset } : {}),
       ...(claudeReset ? { claudeReset } : {}),
-      ...(argonReset ? { argonReset } : {}),
       ...(carbonReset ? { carbonReset } : {}),
       updatedAt: Date.now()
     };
@@ -2113,9 +2543,6 @@ export class QuotaService {
     const m = this.parseMetrics(quota);
     if (m.plan === '--') return '';
     const parts = [`Gemini: ${m.gemini}`, `Claude: ${m.claudeGpt}`];
-    if (m.argon !== 'incl.' && m.argon !== '--') {
-      parts.push(`Argon: ${m.argon}`);
-    }
     if (m.carbon && m.carbon !== 'incl.' && m.carbon !== '--') {
       parts.push(`Carbon: ${m.carbon}`);
     }
@@ -2273,19 +2700,20 @@ export class QuotaService {
     ) {
       let geminiGroup: QuotaGroup | undefined;
       let claudeGroup: QuotaGroup | undefined;
-      let argonGroup: QuotaGroup | undefined;
       let carbonGroup: QuotaGroup | undefined;
 
       for (const g of effectiveLiveQuota.groups) {
         const n = g.displayName.toLowerCase();
         if (n.includes('argon')) {
-          argonGroup = g;
+          continue;
         } else if (n.includes('carbon')) {
           carbonGroup = g;
         } else if (n.includes('claude') || n.includes('gpt')) {
           claudeGroup = g;
         } else if (n.includes('gemini')) {
           geminiGroup = g;
+        } else if (!carbonGroup) {
+          carbonGroup = g;
         }
       }
 
@@ -2320,7 +2748,7 @@ export class QuotaService {
         );
 
         const geminiSub =
-          planBadge === 'ULTRA' ? '*(Flash, Pro, Carbon)*' : '*(Flash, Pro)*';
+          planBadge === 'FREE' ? '*(Hydrogen, Flash, Pro)*' : '*(Hydrogen, Neon, Carbon)*';
         const row = [
           this.padTableCell(`**Gemini** ${geminiSub}`),
           this.padTableCell(renderHoverGaugeCell(pMin, true, isLight, activeNeedsReauth)),
@@ -2377,42 +2805,7 @@ export class QuotaService {
         md.appendMarkdown(`| ${row.join(' | ')} |\n`);
       }
 
-      if (planBadge === 'PRO' && argonGroup) {
-        const b = argonGroup.buckets[0];
-        const p = b && !b.disabled ? percentFromFraction(b.remainingFraction) : null;
-        const r = b?.resetTime ? this.formatResetCompact(b.resetTime) : '';
-        const statusNote =
-          p === null
-            ? 'Usage unavailable'
-            : p === 0
-              ? `<span style="color:${pal.crimson};">**Depleted**</span>`
-              : 'Pro allowance';
-
-        const row = [
-          this.padTableCell('**Argon** *(Gemini 4 Argon)*'),
-          this.padTableCell(renderHoverGaugeCell(p, true, isLight, activeNeedsReauth)),
-          this.padTableCell(
-            `${statusNote}${r && p !== null && p < 100 ? ` &nbsp;·&nbsp; resets in **${r}**` : ''}`
-          )
-        ];
-        md.appendMarkdown(`| ${row.join(' | ')} |\n`);
-      } else if (planBadge === 'ULTRA') {
-        const row = [
-          this.padTableCell('**Argon & Carbon** *(Gemini 4)*'),
-          this.padTableCell(renderHoverPill('Included', 'plan', isLight)),
-          this.padTableCell('Bundled inside Gemini pool &nbsp;·&nbsp; Ultra tier')
-        ];
-        md.appendMarkdown(`| ${row.join(' | ')} |\n`);
-      } else {
-        const row = [
-          this.padTableCell('**Argon** *(Gemini 4 Argon)*'),
-          this.padTableCell('`--`'),
-          this.padTableCell('Not included in Free tier')
-        ];
-        md.appendMarkdown(`| ${row.join(' | ')} |\n`);
-      }
-
-      // Smart auto-adaptive Carbon row: if Google provisions an independent Carbon quota group on Pro/Ultra
+      // Dynamic extra pool row: renders only if Google provisions a separate upstream group
       if (carbonGroup && planBadge !== 'FREE') {
         const b5h = carbonGroup.buckets.find((b) => b.window === '5h');
         const bWk =
@@ -2431,12 +2824,13 @@ export class QuotaService {
               ? this.formatResetCompact(bWk.resetTime)
               : '';
         if (p !== null) {
+          const extraTitle = this.escapeMarkdownLabel(carbonGroup.displayName || 'Extra Pool');
           const statusNote =
             p === 0
               ? `<span style="color:${pal.crimson};">**Depleted**</span>`
               : `${planBadge === 'ULTRA' ? 'Ultra' : 'Pro'} allowance`;
           const row = [
-            this.padTableCell('**Carbon** *(Gemini 4 Carbon)*'),
+            this.padTableCell(`**${extraTitle}**`),
             this.padTableCell(renderHoverGaugeCell(p, true, isLight, activeNeedsReauth)),
             this.padTableCell(
               `${statusNote}${r && p < 100 ? ` &nbsp;·&nbsp; resets in **${r}**` : ''}`
@@ -2465,7 +2859,7 @@ export class QuotaService {
       md.appendMarkdown(`|:---|:---:|:---|\n`);
 
       const geminiSub =
-        planBadge === 'ULTRA' ? '*(Flash, Pro, Carbon)*' : '*(Flash, Pro)*';
+        planBadge === 'FREE' ? '*(Hydrogen, Flash, Pro)*' : '*(Hydrogen, Neon, Carbon)*';
       const gParts = [
         `5h: ${renderHoverPct(g5h, true, isLight, activeNeedsReauth)}${r5h && g5h !== null && g5h < 100 ? ` *(${r5h})*` : ''}`,
         `7d: ${renderHoverPct(gWk, true, isLight, activeNeedsReauth)}${rWk && gWk !== null && gWk < 100 ? ` *(${rWk})*` : ''}`
@@ -2488,42 +2882,21 @@ export class QuotaService {
         md.appendMarkdown(
           `| ${this.padTableCell('**Claude & GPT** *(Opus, Sonnet)*')} | ${this.padTableCell(renderHoverGaugeCell(cPct, true, isLight, activeNeedsReauth))} | ${this.padTableCell(`${cNote}${cRst && cPct !== null && cPct < 100 ? ` &nbsp;·&nbsp; resets in **${cRst}**` : ''}`)} |\n`
         );
-      } else {
-        md.appendMarkdown(
-          `| ${this.padTableCell('**Claude & GPT** *(Opus, Sonnet)*')} | ${this.padTableCell('`--`')} | ${this.padTableCell('Not included in Free tier')} |\n`
-        );
-      }
-
-      if (planBadge === 'PRO') {
-        const aPct = percentFromText(cq.argon);
-        const aRst = cq.argonReset ? this.formatResetCompact(cq.argonReset) : '';
-        const aNote =
-          aPct === null
-            ? 'Usage unavailable'
-            : aPct === 0
-              ? `<span style="color:${pal.crimson};">**Depleted**</span>`
-              : 'Pro allowance';
-        md.appendMarkdown(
-          `| ${this.padTableCell('**Argon** *(Gemini 4 Argon)*')} | ${this.padTableCell(renderHoverGaugeCell(aPct, true, isLight, activeNeedsReauth))} | ${this.padTableCell(`${aNote}${aRst && aPct !== null && aPct < 100 ? ` &nbsp;·&nbsp; resets in **${aRst}**` : ''}`)} |\n`
-        );
-        const cbPct = percentFromText(cq.carbon);
+        const cbPct =
+          cq.carbon && cq.carbon !== 'incl.' ? percentFromText(cq.carbon) : null;
         if (cbPct !== null) {
           const cbRst = cq.carbonReset ? this.formatResetCompact(cq.carbonReset) : '';
           const cbNote =
             cbPct === 0
               ? `<span style="color:${pal.crimson};">**Depleted**</span>`
-              : 'Pro allowance';
+              : `${planBadge === 'ULTRA' ? 'Ultra' : 'Pro'} allowance`;
           md.appendMarkdown(
-            `| ${this.padTableCell('**Carbon** *(Gemini 4 Carbon)*')} | ${this.padTableCell(renderHoverGaugeCell(cbPct, true, isLight, activeNeedsReauth))} | ${this.padTableCell(`${cbNote}${cbRst && cbPct < 100 ? ` &nbsp;·&nbsp; resets in **${cbRst}**` : ''}`)} |\n`
+            `| ${this.padTableCell('**Carbon** *(Extra Pool)*')} | ${this.padTableCell(renderHoverGaugeCell(cbPct, true, isLight, activeNeedsReauth))} | ${this.padTableCell(`${cbNote}${cbRst && cbPct < 100 ? ` &nbsp;·&nbsp; resets in **${cbRst}**` : ''}`)} |\n`
           );
         }
-      } else if (planBadge === 'ULTRA') {
-        md.appendMarkdown(
-          `| ${this.padTableCell('**Argon & Carbon** *(Gemini 4)*')} | ${this.padTableCell(renderHoverPill('Included', 'plan', isLight))} | ${this.padTableCell('Bundled inside Gemini pool &nbsp;·&nbsp; Ultra tier')} |\n`
-        );
       } else {
         md.appendMarkdown(
-          `| ${this.padTableCell('**Argon** *(Gemini 4 Argon)*')} | ${this.padTableCell('`--`')} | ${this.padTableCell('Not included in Free tier')} |\n`
+          `| ${this.padTableCell('**Claude & GPT** *(Opus, Sonnet)*')} | ${this.padTableCell('`--`')} | ${this.padTableCell('Not included in Free tier')} |\n`
         );
       }
       md.appendMarkdown(`\n`);
@@ -2554,6 +2927,21 @@ export class QuotaService {
         ? this.parseMetrics(effectiveLiveQuota, activeProfile?.planOverride)
         : null;
 
+      const showExtraCarbonColumn = Boolean(
+        (liveMetrics?.carbon &&
+          liveMetrics.carbon !== '--' &&
+          liveMetrics.carbon !== 'incl.') ||
+          profiles.some((p) => {
+            const pPlan = String(p.planOverride || p.cachedQuota?.plan || 'FREE').toUpperCase();
+            return (
+              pPlan !== 'FREE' &&
+              p.cachedQuota?.carbon &&
+              p.cachedQuota.carbon !== '--' &&
+              p.cachedQuota.carbon !== 'incl.'
+            );
+          })
+      );
+
       const headers = [
         this.padTableCell(''),
         this.padTableCell('Profile'),
@@ -2567,11 +2955,10 @@ export class QuotaService {
         separators.push(':---:');
       }
 
-      headers.push(this.padTableCell('Argon'));
-      separators.push(':---:');
-
-      headers.push(this.padTableCell('Carbon'));
-      separators.push(':---:');
+      if (showExtraCarbonColumn) {
+        headers.push(this.padTableCell('Carbon'));
+        separators.push(':---:');
+      }
 
       headers.push(this.padTableCell('Snap'));
       separators.push(':---:');
@@ -2584,7 +2971,6 @@ export class QuotaService {
         const uPlan = liveMetrics?.plan && liveMetrics.plan !== '--' ? liveMetrics.plan : 'FREE';
         const uGemini = this.sanitizeMetric(liveMetrics?.gemini);
         const uClaude = this.sanitizeMetric(liveMetrics?.claudeGpt);
-        const uArgon = this.sanitizeMetric(liveMetrics?.argon);
         const uCarbon = this.sanitizeMetric(liveMetrics?.carbon);
 
         const safeSaveTitle = `Save ${(liveEmail || '').replace(/"/g, '\\"')} to vault`;
@@ -2601,8 +2987,9 @@ export class QuotaService {
             this.padTableCell(renderHoverPct(uClaude, true, isLight, activeNeedsReauth || activeNeedsVerify))
           );
         }
-        uCells.push(this.padTableCell(renderHoverPct(uArgon, true, isLight, activeNeedsReauth || activeNeedsVerify)));
-        uCells.push(this.padTableCell(renderHoverPct(uCarbon, true, isLight, activeNeedsReauth || activeNeedsVerify)));
+        if (showExtraCarbonColumn) {
+          uCells.push(this.padTableCell(renderHoverPct(uCarbon, true, isLight, activeNeedsReauth || activeNeedsVerify)));
+        }
         uCells.push(
           this.padTableCell(
             activeNeedsReauth
@@ -2703,22 +3090,11 @@ export class QuotaService {
         const sGemini = this.sanitizeMetric(rawMetrics.gemini);
         const rawClaude = this.sanitizeMetric(rawMetrics.claudeGpt);
         const sClaude = sPlan === 'FREE' ? '--' : rawClaude;
-        const rawArgon = this.sanitizeMetric(rawMetrics.argon);
-        const sArgon =
-          sPlan === 'FREE'
-            ? '--'
-            : sPlan === 'ULTRA'
-              ? 'incl.'
-              : rawArgon !== '--'
-                ? rawArgon
-                : '--';
         const rawCarbon = this.sanitizeMetric(rawMetrics.carbon);
         const sCarbon =
-          sPlan === 'FREE'
+          sPlan === 'FREE' || rawCarbon === 'incl.'
             ? '--'
-            : sPlan === 'ULTRA' && rawCarbon === '--'
-              ? 'incl.'
-              : rawCarbon;
+            : rawCarbon;
         const snapText = pNeedsReauth
           ? `<span style="color:${pal.crimson};">*${rawMetrics.updatedAt ? `stale · ${this.formatTimeAgo(rawMetrics.updatedAt)}` : 'stale'}*</span>`
           : pNeedsVerify
@@ -2733,7 +3109,6 @@ export class QuotaService {
         const rowMuted = pNeedsReauth || pNeedsVerify;
         const geminiText = renderHoverPct(sGemini, isActive, isLight, rowMuted);
         const claudeText = renderHoverPct(sClaude, isActive, isLight, rowMuted);
-        const argonText = renderHoverPct(sArgon, isActive, isLight, rowMuted);
         const carbonText = renderHoverPct(sCarbon, isActive, isLight, rowMuted);
 
         const cells = [
@@ -2747,8 +3122,9 @@ export class QuotaService {
           cells.push(this.padTableCell(claudeText));
         }
 
-        cells.push(this.padTableCell(argonText));
-        cells.push(this.padTableCell(carbonText));
+        if (showExtraCarbonColumn) {
+          cells.push(this.padTableCell(carbonText));
+        }
         cells.push(this.padTableCell(snapText));
 
         md.appendMarkdown(`| ${cells.join(' | ')} |\n`);

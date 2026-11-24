@@ -86,6 +86,7 @@ export class UIController implements vscode.Disposable {
   private quotaService: QuotaService;
   private codexVault: CodexVault;
   private codexQuotaService: CodexQuotaService;
+  private workspaceState?: vscode.Memento;
   private sidebar: CharlierSidebarProvider | null = null;
   private selectedProvider: ActiveProviderId;
   private promptedEmails: Set<string> = new Set();
@@ -175,22 +176,30 @@ export class UIController implements vscode.Disposable {
     vault: Vault,
     quotaService: QuotaService,
     codexVault: CodexVault,
-    codexQuotaService: CodexQuotaService
+    codexQuotaService: CodexQuotaService,
+    workspaceState?: vscode.Memento
   ) {
     this.vault = vault;
     this.quotaService = quotaService;
     this.codexVault = codexVault;
     this.codexQuotaService = codexQuotaService;
+    this.workspaceState = workspaceState;
 
     const savedState = this.vault.getState();
     const host = this.getHostKey();
+    const workspaceSaved =
+      host === 'vscode'
+        ? this.workspaceState?.get<ActiveProviderId>('charlier.selectedProvider')
+        : undefined;
     const hostSaved = savedState.selectedProviderByHost?.[host];
     const savedProvider =
-      savedState.selectedProviderByHost !== undefined
-        ? host === 'antigravity'
-          ? 'antigravity'
-          : (hostSaved ?? savedState.selectedProvider)
-        : savedState.selectedProvider;
+      workspaceSaved === 'antigravity' || workspaceSaved === 'codex'
+        ? workspaceSaved
+        : savedState.selectedProviderByHost !== undefined
+          ? host === 'antigravity'
+            ? 'antigravity'
+            : (hostSaved ?? savedState.selectedProvider)
+          : savedState.selectedProvider;
     this.selectedProvider =
       savedProvider === 'antigravity' || savedProvider === 'codex'
         ? savedProvider
@@ -875,7 +884,7 @@ export class UIController implements vscode.Disposable {
       if (tasks.length > 0) {
         await Promise.allSettled(tasks);
       }
-      if (!this.disposed && (shouldRepaint || this.sidebarVisible)) {
+      if (!this.disposed && shouldRepaint) {
         this.scheduleUpdate(60, true);
       }
     } finally {
@@ -1005,6 +1014,11 @@ export class UIController implements vscode.Disposable {
     this.selectedProvider = next;
     if (isManual) {
       const host = this.getHostKey();
+      if (host === 'vscode' && typeof this.workspaceState?.update === 'function') {
+        void Promise.resolve(
+          this.workspaceState.update('charlier.selectedProvider', next)
+        ).catch(() => {});
+      }
       if (typeof this.vault.setSelectedProviderForHost === 'function') {
         if (host === 'vscode') {
           this.vault.setSelectedProviderForHost('vscode', next);
@@ -2638,218 +2652,247 @@ export class UIController implements vscode.Disposable {
   }
 
   private async showCodexQuickPickMenu(): Promise<void> {
-    const profiles = this.codexVault.listProfiles();
-    const live = this.codexVault.getLiveSessionInfo();
-    const authenticated = Boolean(
-      live.email || live.accountId || live.hasOAuthCreds
-    );
-    const activeProfile = this.codexVault.findMatchingProfile(live);
+    let profiles = this.codexVault.listProfiles();
+    let live = this.codexVault.getLiveSessionInfo();
+    let activeProfile = this.codexVault.findMatchingProfile(live);
+    let cachedCodexMetric =
+      this.codexQuotaService.getCachedMetric() ||
+      this.lastFrame?.codex.metrics ||
+      null;
 
-    const items: ProfileQuickPickItem[] = [];
-
-    if (authenticated && !activeProfile && (live.email || live.accountId)) {
-      items.push({
-        label: '$(sparkle) Unsaved Codex Session',
-        kind: vscode.QuickPickItemKind.Separator,
-        action: 'noop'
-      });
-
-      const liveEmail =
-        live.email || live.accountId || 'Authenticated Codex Session';
-      items.push({
-        label: `$(add) Save "${liveEmail}" to Vault`,
-        description: `${live.planTier || 'PLUS'} Plan`,
-        detail:
-          ' Snapshot your current ~/.codex/auth.json login so you can switch back in 1 click',
-        action: 'save',
-        provider: 'codex'
-      });
-    }
-
-    if (profiles.length > 0) {
-      items.push({
-        label: `OpenAI Codex Vault (${profiles.length})`,
-        kind: vscode.QuickPickItemKind.Separator,
-        action: 'noop'
-      });
-
-      const codexClaimedIds = this.getClaimedProfileIds('codex');
-      const sortedProfiles = sortProfilesForDisplay(
-        profiles,
-        activeProfile?.id || null,
-        codexClaimedIds
+    const buildCodexItems = (): {
+      items: ProfileQuickPickItem[];
+      fingerprint: string;
+      title: string;
+    } => {
+      const authenticated = Boolean(
+        live.email || live.accountId || live.hasOAuthCreds
       );
-      const cachedCodexMetric = this.codexQuotaService.getCachedMetric();
-      const activeCodexStatus = resolveEffectiveAuthStatus(
-        activeProfile?.authStatus,
-        live.authStatus
-      );
-      const activeCodexNeedsAction =
-        activeCodexStatus === 'revoked' ||
-        activeCodexStatus === 'expired' ||
-        (!activeProfile && !authenticated);
-      const activeCodexRaw = cachedCodexMetric || activeProfile?.cachedQuota;
-      const activeCodexMetric = codexMetricForDisplay(
-        activeCodexNeedsAction ? activeCodexRaw : healExpiredCodexMetric(activeCodexRaw),
-        activeProfile?.authMode || live.authMode
-      );
-      const activeCodexKnown = [
-        percentFromText(activeCodexMetric?.codex5h),
-        percentFromText(activeCodexMetric?.codex7d)
-      ].filter((n): n is number => n !== null);
-      const bestCodexStandby = resolveBestStandbyProfile({
-        provider: 'codex',
-        profiles,
-        activeProfileId: activeProfile?.id || null,
-        activeMinPct: activeCodexKnown.length ? Math.min(...activeCodexKnown) : null,
-        activeNeedsAction: activeCodexNeedsAction,
-        claimedProfileIds: codexClaimedIds,
-        normalizeCodexMetric: (cm, am) =>
-          codexMetricForDisplay(healExpiredCodexMetric(cm), am)
-      });
+      const items: ProfileQuickPickItem[] = [];
 
-      for (const prof of sortedProfiles) {
-        const isCurrent = Boolean(
-          activeProfile && prof.id === activeProfile.id
-        );
-        const isClaimed = codexClaimedIds.has(prof.id);
-        const isBestNext = Boolean(
-          bestCodexStandby && bestCodexStandby.profile.id === prof.id
-        );
-        const profNeedsReauth =
-          prof.authStatus === 'revoked' || prof.authStatus === 'expired';
-        const cq = codexMetricForDisplay(
-          profNeedsReauth ? prof.cachedQuota : healExpiredCodexMetric(prof.cachedQuota),
-          prof.authMode
-        );
-        const planName =
-          prof.planOverride ||
-          cq?.plan ||
-          (prof.authMode === 'apikey'
-            ? 'API_KEY'
-            : isCurrent && live.planTier
-              ? live.planTier
-              : 'PLUS');
-
-        const buttons: vscode.QuickInputButton[] = [
-          ...(!isCurrent
-            ? [
-                {
-                  iconPath: new vscode.ThemeIcon('terminal'),
-                  tooltip: isClaimed
-                    ? `Focus claimed CLI terminal for "${prof.name}"`
-                    : `Switch CLI Only for "${prof.name}" (Zero Extension Reload)`
-                }
-              ]
-            : []),
-          {
-            iconPath: new vscode.ThemeIcon('graph'),
-            tooltip: `Inspect 5h & Weekly Pools for "${prof.name}"`
-          },
-          {
-            iconPath: new vscode.ThemeIcon('edit'),
-            tooltip: `Rename "${prof.name}"`
-          },
-          ...(!isCurrent && !isClaimed
-            ? [
-                {
-                  iconPath: new vscode.ThemeIcon('trash'),
-                  tooltip: `Delete "${prof.name}"`
-                }
-              ]
-            : [])
-        ];
-
-        const detailLine = this.formatCodexProfileDetailLine(
-          cq,
-          planName,
-          isCurrent
-        );
-        const cliTag = isClaimed ? '  ·  $(terminal) CLI CLAIMED' : '';
-        const nextTag = isBestNext
-          ? `  ·  $(zap) NEXT UP (${bestCodexStandby!.scorePct}%)`
-          : '';
-        const reauthTag =
-          prof.authStatus === 'revoked' || prof.authStatus === 'expired'
-            ? '  ·  $(warning) RE-AUTH'
-            : '';
-
+      if (authenticated && !activeProfile && (live.email || live.accountId)) {
         items.push({
-          label: `${isCurrent ? '$(check)' : '$(charlier-codex-prompt)'} ${prof.name}`,
-          description: `${prof.email}  ·  ${planName}${reauthTag}${cliTag}${nextTag}`,
-          detail: `    ${detailLine}`,
-          action: isCurrent ? 'quota' : 'switch',
-          profileId: prof.id,
-          provider: 'codex',
-          buttons
+          label: '$(sparkle) Unsaved Codex Session',
+          kind: vscode.QuickPickItemKind.Separator,
+          action: 'noop'
+        });
+
+        const liveEmail =
+          live.email || live.accountId || 'Authenticated Codex Session';
+        items.push({
+          label: `$(add) Save "${liveEmail}" to Vault`,
+          description: `${live.planTier || 'PLUS'} Plan`,
+          detail:
+            ' Snapshot your current ~/.codex/auth.json login so you can switch back in 1 click',
+          action: 'save',
+          provider: 'codex'
         });
       }
-    }
 
-    items.push({
-      label: 'Deck & Actions',
-      kind: vscode.QuickPickItemKind.Separator,
-      action: 'noop'
-    });
+      if (profiles.length > 0) {
+        items.push({
+          label: `OpenAI Codex Vault (${profiles.length})`,
+          kind: vscode.QuickPickItemKind.Separator,
+          action: 'noop'
+        });
 
-    items.push({
-      label: '$(arrow-swap) Switch Deck to Google Antigravity',
-      description: `${this.vault.listProfiles().length} saved`,
-      detail:
-        '    View and switch Antigravity accounts without restarting extensions',
-      action: 'switchProvider',
-      provider: 'antigravity'
-    });
+        const codexClaimedIds = this.getClaimedProfileIds('codex');
+        const sortedProfiles = sortProfilesForDisplay(
+          profiles,
+          activeProfile?.id || null,
+          codexClaimedIds
+        );
+        const activeCodexStatus = resolveEffectiveAuthStatus(
+          activeProfile?.authStatus,
+          live.authStatus
+        );
+        const activeCodexNeedsAction =
+          activeCodexStatus === 'revoked' ||
+          activeCodexStatus === 'expired' ||
+          (!activeProfile && !authenticated);
+        const activeCodexRaw = cachedCodexMetric || activeProfile?.cachedQuota;
+        const activeCodexMetric = codexMetricForDisplay(
+          activeCodexNeedsAction
+            ? activeCodexRaw
+            : healExpiredCodexMetric(activeCodexRaw),
+          activeProfile?.authMode || live.authMode
+        );
+        const activeCodexKnown = [
+          percentFromText(activeCodexMetric?.codex5h),
+          percentFromText(activeCodexMetric?.codex7d)
+        ].filter((n): n is number => n !== null);
+        const bestCodexStandby = resolveBestStandbyProfile({
+          provider: 'codex',
+          profiles,
+          activeProfileId: activeProfile?.id || null,
+          activeMinPct: activeCodexKnown.length
+            ? Math.min(...activeCodexKnown)
+            : null,
+          activeNeedsAction: activeCodexNeedsAction,
+          claimedProfileIds: codexClaimedIds,
+          normalizeCodexMetric: (cm, am) =>
+            codexMetricForDisplay(healExpiredCodexMetric(cm), am)
+        });
 
-    items.push({
-      label: '$(layout-sidebar-left) Open Charlier Cockpit Sidebar',
-      description: 'Visual gauges & multi-provider deck',
-      action: 'openCockpit'
-    });
+        for (const prof of sortedProfiles) {
+          const isCurrent = Boolean(
+            activeProfile && prof.id === activeProfile.id
+          );
+          const isClaimed = codexClaimedIds.has(prof.id);
+          const isBestNext = Boolean(
+            bestCodexStandby && bestCodexStandby.profile.id === prof.id
+          );
+          const profNeedsReauth =
+            prof.authStatus === 'revoked' || prof.authStatus === 'expired';
+          const rawMetric = isCurrent
+            ? cachedCodexMetric &&
+              (!prof.cachedQuota?.updatedAt ||
+                (cachedCodexMetric.updatedAt || 0) >= prof.cachedQuota.updatedAt)
+              ? cachedCodexMetric
+              : prof.cachedQuota
+            : prof.cachedQuota;
+          const cq = codexMetricForDisplay(
+            profNeedsReauth ? rawMetric : healExpiredCodexMetric(rawMetric),
+            prof.authMode
+          );
+          const planName =
+            prof.planOverride ||
+            cq?.plan ||
+            (prof.authMode === 'apikey'
+              ? 'API_KEY'
+              : isCurrent && live.planTier
+                ? live.planTier
+                : 'PLUS');
 
-    items.push({
-      label: '$(person-add) Add Another Codex Account',
-      description: activeProfile
-        ? `Backs up "${activeProfile.name}" & prepares new Codex login`
-        : 'Backs up ~/.codex/auth.json & prepares new Codex login',
-      action: 'addAccount',
-      provider: 'codex'
-    });
+          const buttons: vscode.QuickInputButton[] = [
+            ...(!isCurrent
+              ? [
+                  {
+                    iconPath: new vscode.ThemeIcon('terminal'),
+                    tooltip: isClaimed
+                      ? `Focus claimed CLI terminal for "${prof.name}"`
+                      : `Switch CLI Only for "${prof.name}" (Zero Extension Reload)`
+                  }
+                ]
+              : []),
+            {
+              iconPath: new vscode.ThemeIcon('graph'),
+              tooltip: `Inspect 5h & Weekly Pools for "${prof.name}"`
+            },
+            {
+              iconPath: new vscode.ThemeIcon('edit'),
+              tooltip: `Rename "${prof.name}"`
+            },
+            ...(!isCurrent && !isClaimed
+              ? [
+                  {
+                    iconPath: new vscode.ThemeIcon('trash'),
+                    tooltip: `Delete "${prof.name}"`
+                  }
+                ]
+              : [])
+          ];
 
-    if (authenticated) {
+          const detailLine = this.formatCodexProfileDetailLine(
+            cq,
+            planName,
+            isCurrent
+          );
+          const cliTag = isClaimed ? '  ·  $(terminal) CLI CLAIMED' : '';
+          const nextTag = isBestNext
+            ? `  ·  $(zap) NEXT UP (${bestCodexStandby!.scorePct}%)`
+            : '';
+          const reauthTag =
+            prof.authStatus === 'revoked' || prof.authStatus === 'expired'
+              ? '  ·  $(warning) RE-AUTH'
+              : '';
+
+          items.push({
+            label: `${isCurrent ? '$(check)' : '$(charlier-codex-prompt)'} ${prof.name}`,
+            description: `${prof.email}  ·  ${planName}${reauthTag}${cliTag}${nextTag}`,
+            detail: `    ${detailLine}`,
+            action: isCurrent ? 'quota' : 'switch',
+            profileId: prof.id,
+            provider: 'codex',
+            buttons
+          });
+        }
+      }
+
       items.push({
-        label: activeProfile
-          ? `$(cloud-upload) Update "${activeProfile.name}" Snapshot`
-          : '$(add) Save Current ~/.codex/auth.json as New Profile',
-        description: live.email || 'Active Codex session',
-        action: 'save',
+        label: 'Deck & Actions',
+        kind: vscode.QuickPickItemKind.Separator,
+        action: 'noop'
+      });
+
+      items.push({
+        label: '$(arrow-swap) Switch Deck to Google Antigravity',
+        description: `${this.vault.listProfiles().length} saved`,
+        detail:
+          '    View and switch Antigravity accounts without restarting extensions',
+        action: 'switchProvider',
+        provider: 'antigravity'
+      });
+
+      items.push({
+        label: '$(layout-sidebar-left) Open Charlier Cockpit Sidebar',
+        description: 'Visual gauges & multi-provider deck',
+        action: 'openCockpit'
+      });
+
+      items.push({
+        label: '$(person-add) Add Another Codex Account',
+        description: activeProfile
+          ? `Backs up "${activeProfile.name}" & prepares new Codex login`
+          : 'Backs up ~/.codex/auth.json & prepares new Codex login',
+        action: 'addAccount',
         provider: 'codex'
       });
-    }
 
-    items.push({
-      label: '$(sync) Refresh All Codex Quotas',
-      description:
-        'Query live 5h & 7d wham/usage across all saved Codex profiles',
-      action: 'refresh',
-      provider: 'codex'
-    });
+      if (authenticated) {
+        items.push({
+          label: activeProfile
+            ? `$(cloud-upload) Update "${activeProfile.name}" Snapshot`
+            : '$(add) Save Current ~/.codex/auth.json as New Profile',
+          description: live.email || 'Active Codex session',
+          action: 'save',
+          provider: 'codex'
+        });
+      }
 
-    items.push({
-      label: '$(chevron-up) Hover Status Bar Pill for Live Quota Overlay',
-      description: 'Adjust workbench.hover.delay in Settings if needed',
-      action: 'openHoverSettings'
-    });
+      items.push({
+        label: '$(sync) Refresh All Codex Quotas',
+        description:
+          'Query live 5h & 7d wham/usage across all saved Codex profiles',
+        action: 'refresh',
+        provider: 'codex'
+      });
+
+      items.push({
+        label: '$(chevron-up) Hover Status Bar Pill for Live Quota Overlay',
+        description: 'Adjust workbench.hover.delay in Settings if needed',
+        action: 'openHoverSettings'
+      });
+
+      const title = activeProfile
+        ? `Charlier · OpenAI Codex · ${activeProfile.name} (${activeProfile.email})`
+        : live.email
+          ? `Charlier · OpenAI Codex · ${live.email} (Unsaved Session)`
+          : 'Charlier · OpenAI Codex Deck';
+      const fingerprint = JSON.stringify(
+        items.map((it) => [it.label, it.description, it.detail, it.action, it.profileId])
+      );
+      return { items, fingerprint, title };
+    };
 
     const quickPick = vscode.window.createQuickPick<ProfileQuickPickItem>();
-    quickPick.title = activeProfile
-      ? `Charlier · OpenAI Codex · ${activeProfile.name} (${activeProfile.email})`
-      : live.email
-        ? `Charlier · OpenAI Codex · ${live.email} (Unsaved Session)`
-        : 'Charlier · OpenAI Codex Deck';
+    let closed = false;
+    const initial = buildCodexItems();
+    let lastFingerprint = initial.fingerprint;
+    quickPick.title = initial.title;
     quickPick.placeholder =
       'Select a Codex account to switch, click ">_" for CLI-only swap, or flip to Antigravity';
-    quickPick.items = items;
+    quickPick.items = initial.items;
     quickPick.matchOnDescription = true;
     quickPick.matchOnDetail = true;
 
@@ -2915,8 +2958,37 @@ export class UIController implements vscode.Disposable {
       }
     });
 
-    quickPick.onDidHide(() => quickPick.dispose());
+    quickPick.onDidHide(() => {
+      closed = true;
+      quickPick.dispose();
+    });
     quickPick.show();
+
+    const activeAgeMs = cachedCodexMetric?.updatedAt
+      ? Date.now() - cachedCodexMetric.updatedAt
+      : Infinity;
+    if (
+      (live.email || live.accountId || live.hasOAuthCreds) &&
+      live.authMode !== 'apikey' &&
+      activeAgeMs > 45_000
+    ) {
+      void this.codexQuotaService
+        .getActiveQuotaSummary(this.codexVault, false)
+        .then((res) => {
+          if (closed || this.disposed) return;
+          profiles = this.codexVault.listProfiles();
+          live = this.codexVault.getLiveSessionInfo();
+          activeProfile = this.codexVault.findMatchingProfile(live);
+          cachedCodexMetric = res?.metric || cachedCodexMetric;
+          const next = buildCodexItems();
+          if (next.fingerprint !== lastFingerprint) {
+            lastFingerprint = next.fingerprint;
+            quickPick.title = next.title;
+            quickPick.items = next.items;
+          }
+        })
+        .catch(() => {});
+    }
   }
 
   public async handleRename(
@@ -2975,18 +3047,19 @@ export class UIController implements vscode.Disposable {
         {
           label: 'FREE',
           description:
-            'Google AI Free tier (hides Claude/GPT and Argon Pro bars)',
+            'Google AI Free tier (Gemini starter quota; hides Claude & GPT)',
           tier: 'FREE' as UserPlanTier
         },
         {
           label: 'PRO',
           description:
-            'Google AI Pro tier (shows Gemini, Claude/GPT, and Argon Pro weekly limit)',
+            'Google AI Pro tier (unified Gemini 4 + Claude & GPT 5h and weekly pools)',
           tier: 'PRO' as UserPlanTier
         },
         {
           label: 'ULTRA',
-          description: 'Google AI Ultra tier (all pools + Argon Included)',
+          description:
+            'Google AI Ultra tier (highest-capacity Gemini 4 + Claude & GPT pools)',
           tier: 'ULTRA' as UserPlanTier
         }
       ],
@@ -3606,24 +3679,22 @@ export class UIController implements vscode.Disposable {
         this.codexQuotaService.invalidateCache();
         this.onCredentialsMutated?.();
 
-        await this.update(true);
-
-        // Refresh outgoing and newly activated profile usage asynchronously in the background
-        // so the switch itself is instant and only triggers one coalesced repaint.
-        const refreshTasks: Array<Promise<any>> = [
-          this.codexQuotaService.refreshProfileQuota(meta.id, this.codexVault, true)
-        ];
-        if (prevMatched && prevMatched.id !== profileId) {
-          refreshTasks.push(
-            this.codexQuotaService.refreshProfileQuota(prevMatched.id, this.codexVault, false)
-          );
-        }
-        Promise.allSettled(refreshTasks)
-          .then(() => {
-            this.onCredentialsMutated?.();
-            this.scheduleUpdate(60, true);
-          })
-          .catch(() => {});
+        const triggerPostSwitchCodexRefresh = () => {
+          const refreshTasks: Array<Promise<any>> = [
+            this.codexQuotaService.refreshProfileQuota(meta.id, this.codexVault, true)
+          ];
+          if (prevMatched && prevMatched.id !== profileId) {
+            refreshTasks.push(
+              this.codexQuotaService.refreshProfileQuota(prevMatched.id, this.codexVault, false)
+            );
+          }
+          Promise.allSettled(refreshTasks)
+            .then(() => {
+              this.onCredentialsMutated?.();
+              this.scheduleUpdate(60, true);
+            })
+            .catch(() => {});
+        };
 
         const config = vscode.workspace.getConfiguration('charlier');
         const useCodexSurgical = config.get<boolean>(
@@ -3632,10 +3703,13 @@ export class UIController implements vscode.Disposable {
         );
 
         if (useCodexSurgical) {
-          const swapStatus =
-            await this.codexQuotaService.hotSwapCodexAppServer(
-              meta.authMode || 'chatgpt'
-            );
+          // Kick off surgical stdio hot-swap concurrently with Cockpit/Status Bar repaint
+          // so the Codex sidebar starts transitioning in the exact same tick as Charlier.
+          const swapPromise = this.codexQuotaService.hotSwapCodexAppServer(
+            meta.authMode || 'chatgpt'
+          );
+          const [, swapStatus] = await Promise.all([this.update(true), swapPromise]);
+          triggerPostSwitchCodexRefresh();
           if (swapStatus === 'swapped' || swapStatus === 'not-running') {
             vscode.window.setStatusBarMessage(
               `$(check) Switched Codex to "${meta.name}" (${meta.email}) · ${
@@ -3647,6 +3721,9 @@ export class UIController implements vscode.Disposable {
             );
             return;
           }
+        } else {
+          await this.update(true);
+          triggerPostSwitchCodexRefresh();
         }
 
         vscode.window.setStatusBarMessage(
@@ -3768,10 +3845,8 @@ export class UIController implements vscode.Disposable {
       this.quotaService.invalidate();
       this.onCredentialsMutated?.();
 
-      await this.update(true);
-
       // Refresh outgoing profile quota over Cloud Code HTTPS in the background so
-      // any Argon/Gemini burn right before the switch is captured without blocking the switch!
+      // any Gemini/Claude burn right before the switch is captured without blocking the switch!
       if (outgoing && outgoing.id !== meta.id) {
         this.quotaService
           .refreshInactiveProfile(outgoing, this.vault, true)
@@ -3783,13 +3858,27 @@ export class UIController implements vscode.Disposable {
       const useSurgical = config.get<boolean>('antigravitySurgicalReload', true);
 
       if (useSurgical) {
-        const respawnStatus = await this.quotaService.respawnActiveDaemon(() => {
+        const onDaemonSynced = () => {
           this.onCredentialsMutated?.();
           this.quotaService
             .getQuotaSummary(true)
             .then(() => this.scheduleUpdate(60, true))
             .catch(() => {});
-        });
+        };
+        const hydrateFn = (this.quotaService as any).hydrateActiveDaemonInPlace;
+        // Start in-place HasAuthToken hydration concurrently with Cockpit/Status Bar repaint
+        // so `antigravity.reconnect` fires in ~15-20ms right alongside Charlier's own UI update.
+        const hydratePromise: Promise<'hydrated' | 'not-running' | 'needs-respawn'> =
+          typeof hydrateFn === 'function'
+            ? hydrateFn.call(this.quotaService, meta.email, onDaemonSynced)
+            : Promise.resolve('needs-respawn');
+        const [, hydrateStatus] = await Promise.all([this.update(true), hydratePromise]);
+        const respawnStatus =
+          hydrateStatus === 'hydrated'
+            ? 'hydrated'
+            : hydrateStatus === 'not-running'
+              ? 'not-running'
+              : await this.quotaService.respawnActiveDaemon(onDaemonSynced);
         if (respawnStatus === 'budget-exhausted') {
           await confirmAndReloadForProviderSwitch('antigravity', meta.name, {
             isFallbackFromSurgical: true,
@@ -3797,7 +3886,11 @@ export class UIController implements vscode.Disposable {
           });
           return;
         }
-        if (respawnStatus === 'respawned' || respawnStatus === 'not-running') {
+        if (
+          respawnStatus === 'hydrated' ||
+          respawnStatus === 'respawned' ||
+          respawnStatus === 'not-running'
+        ) {
           if (respawnStatus === 'not-running') {
             this.quotaService
               .refreshInactiveProfile(meta, this.vault, false)
@@ -3820,14 +3913,18 @@ export class UIController implements vscode.Disposable {
           }
           vscode.window.setStatusBarMessage(
             `$(check) Switched Antigravity to "${meta.name}" (${meta.email}) · ${
-              respawnStatus === 'respawned'
-                ? 'Daemon respawned cleanly'
-                : 'CLI & next IDE launch ready'
+              respawnStatus === 'hydrated'
+                ? 'Session hot-swapped live'
+                : respawnStatus === 'respawned'
+                  ? 'Daemon respawned cleanly'
+                  : 'CLI & next IDE launch ready'
             }`,
             4500
           );
           return;
         }
+      } else {
+        await this.update(true);
       }
 
       await confirmAndReloadForProviderSwitch('antigravity', meta.name, {
@@ -4326,37 +4423,18 @@ export class UIController implements vscode.Disposable {
       parts.push(`Claude ${cq.claudeGpt}${cSuffix}`);
     }
 
-    if (planName === 'PRO') {
-      if (cq.argon && cq.argon !== '--' && cq.argon !== 'incl.') {
-        const aPct = parseInt(cq.argon, 10);
-        const aReset = cq.argonReset
-          ? this.quotaService.formatResetCompact(cq.argonReset)
-          : '';
-        if (aPct === 0) {
-          parts.push(`Argon 0% (${aReset ? aReset : 'Depleted'})`);
-        } else {
-          const aSuffix =
-            aReset && Number.isFinite(aPct) && aPct < 100 ? ` (${aReset})` : '';
-          parts.push(`Argon ${cq.argon}${aSuffix}`);
-        }
+    if (planName !== 'FREE' && cq.carbon && cq.carbon !== '--' && cq.carbon !== 'incl.') {
+      const cbPct = parseInt(cq.carbon, 10);
+      const cbReset = cq.carbonReset
+        ? this.quotaService.formatResetCompact(cq.carbonReset)
+        : '';
+      if (cbPct === 0) {
+        parts.push(`Carbon 0% (${cbReset ? cbReset : 'Depleted'})`);
       } else {
-        parts.push('Argon Pro');
+        const cbSuffix =
+          cbReset && Number.isFinite(cbPct) && cbPct < 100 ? ` (${cbReset})` : '';
+        parts.push(`Carbon ${cq.carbon}${cbSuffix}`);
       }
-      if (cq.carbon && cq.carbon !== '--' && cq.carbon !== 'incl.') {
-        const cbPct = parseInt(cq.carbon, 10);
-        const cbReset = cq.carbonReset
-          ? this.quotaService.formatResetCompact(cq.carbonReset)
-          : '';
-        if (cbPct === 0) {
-          parts.push(`Carbon 0% (${cbReset ? cbReset : 'Depleted'})`);
-        } else {
-          const cbSuffix =
-            cbReset && Number.isFinite(cbPct) && cbPct < 100 ? ` (${cbReset})` : '';
-          parts.push(`Carbon ${cq.carbon}${cbSuffix}`);
-        }
-      }
-    } else if (planName === 'ULTRA') {
-      parts.push('Argon & Carbon Included');
     }
 
     if (!isActive && cq.updatedAt) {
@@ -4460,8 +4538,16 @@ export class UIController implements vscode.Disposable {
       return;
     }
 
+    // Read disk/memory state synchronously so the QuickPick opens at 0ms
     const profiles = this.vault.listProfiles();
-    const live = await this.vault.getLiveSessionInfoAsync();
+    let live =
+      this.vault.getLiveSessionInfo?.() ||
+      this.lastFrame?.agy.live || {
+        email: null,
+        hasOAuthCreds: false,
+        tokenExpiryDate: null,
+        isExpired: false
+      };
     const state = this.vault.getState();
     const target = profileId
       ? profiles.find((p) => p.id === profileId) || null
@@ -4477,60 +4563,29 @@ export class UIController implements vscode.Disposable {
           )
       : true;
 
-    if (!isTargetActive && target) {
-      let cached = target.cachedQuota;
-      if (!cached || !cached.updatedAt || Date.now() - cached.updatedAt > 45000) {
-        vscode.window.setStatusBarMessage(
-          `$(sync~spin) Fetching latest usage for "${target.name}"...`,
-          2000
-        );
-        const refreshed = await this.quotaService.refreshInactiveProfile(
-          target,
-          this.vault,
-          false
-        );
-        if (refreshed) {
-          cached = refreshed;
-          await this.update();
-        }
-      }
-
-      const planLabel = target.planOverride || cached?.plan || 'FREE';
-      const timeAgo = cached?.updatedAt
-        ? this.quotaService.formatTimeAgo(cached.updatedAt)
-        : 'not yet synced';
-      const items: Array<vscode.QuickPickItem & { action?: string }> = [];
-
+    const buildCachedAntigravityRows = (
+      cached: CachedQuotaMetric | null | undefined,
+      planLabel: string,
+      emptyNote: string
+    ): Array<vscode.QuickPickItem & { action?: string }> => {
+      const rows: Array<vscode.QuickPickItem & { action?: string }> = [];
       if (cached && (cached.gemini !== '--' || cached.claudeGpt !== '--')) {
         const g5h = cached.gemini5h || cached.gemini || '--';
         const g5hReset = cached.gemini5hReset || cached.geminiReset;
         const g7d = cached.gemini7d || cached.gemini || '--';
         const g7dReset = cached.gemini7dReset;
-
         const geminiModelScope =
-          planLabel === 'ULTRA' ? 'Flash, Pro & Carbon' : 'Flash & Pro';
+          planLabel === 'FREE' ? 'Hydrogen, Flash & Pro' : 'Hydrogen, Neon & Carbon';
 
-        items.push({
+        rows.push({
           label: 'GEMINI',
           kind: vscode.QuickPickItemKind.Separator
         });
-        items.push(
-          this.buildPoolRow(
-            'pulse',
-            '5-Hour Fast Pool',
-            g5h,
-            g5hReset,
-            geminiModelScope
-          )
+        rows.push(
+          this.buildPoolRow('pulse', '5-Hour Fast Pool', g5h, g5hReset, geminiModelScope)
         );
-        items.push(
-          this.buildPoolRow(
-            'calendar',
-            '7-Day Weekly Pool',
-            g7d,
-            g7dReset,
-            geminiModelScope
-          )
+        rows.push(
+          this.buildPoolRow('calendar', '7-Day Weekly Pool', g7d, g7dReset, geminiModelScope)
         );
 
         if (planLabel !== 'FREE') {
@@ -4539,137 +4594,170 @@ export class UIController implements vscode.Disposable {
           const c7d = cached.claude7d || cached.claudeGpt || '--';
           const c7dReset = cached.claude7dReset || cached.claudeReset;
 
-          items.push({
+          rows.push({
             label: 'CLAUDE & GPT',
             kind: vscode.QuickPickItemKind.Separator
           });
-          items.push(
-            this.buildPoolRow(
-              'pulse',
-              '5-Hour Fast Pool',
-              c5h,
-              c5hReset,
-              'Opus, Sonnet, GPT-OSS'
-            )
+          rows.push(
+            this.buildPoolRow('pulse', '5-Hour Fast Pool', c5h, c5hReset, 'Opus & Sonnet')
           );
-          items.push(
-            this.buildPoolRow(
-              'calendar',
-              '7-Day Weekly Pool',
-              c7d,
-              c7dReset,
-              'Opus, Sonnet, GPT-OSS'
-            )
+          rows.push(
+            this.buildPoolRow('calendar', '7-Day Weekly Pool', c7d, c7dReset, 'Opus & Sonnet')
           );
-        }
 
-        if (planLabel === 'PRO') {
-          items.push({
-            label: 'GEMINI 4 ARGON',
-            kind: vscode.QuickPickItemKind.Separator
-          });
-          items.push(
-            this.buildPoolRow(
-              'flame',
-              '7-Day Weekly Pool',
-              cached.argon,
-              cached.argonReset,
-              'Pro weekly allowance',
-              'Included in Pro · Switch once to sync weekly meter'
-            )
-          );
           if (cached.carbon && cached.carbon !== '--' && cached.carbon !== 'incl.') {
-            items.push({
+            rows.push({
               label: 'GEMINI 4 CARBON',
               kind: vscode.QuickPickItemKind.Separator
             });
-            items.push(
+            rows.push(
               this.buildPoolRow(
                 'flame',
                 '7-Day Weekly Pool',
                 cached.carbon,
                 cached.carbonReset,
-                'Pro weekly allowance'
+                `${planLabel === 'ULTRA' ? 'Ultra' : 'Pro'} allowance`
               )
             );
           }
-        } else if (planLabel === 'ULTRA') {
-          items.push({
-            label: 'GEMINI 4 ARGON & CARBON',
-            kind: vscode.QuickPickItemKind.Separator
-          });
-          items.push(
-            this.buildPoolRow(
-              'sparkle',
-              'Unified Ultra Pool',
-              'incl.',
-              undefined,
-              'Bundled with Gemini 5h & 7d pools'
-            )
-          );
         }
       } else {
-        items.push({
-          label: `  $(info) No usage snapshot recorded for "${target.name}"`,
+        rows.push({
+          label: `  $(info) ${emptyNote}`,
           description: 'Select Refresh below to pull live usage from Google'
         });
       }
+      return rows;
+    };
 
-      items.push({
-        label: 'ACTIONS',
-        kind: vscode.QuickPickItemKind.Separator
-      });
+    if (!isTargetActive && target) {
+      let cached = target.cachedQuota;
+      const qp = vscode.window.createQuickPick<vscode.QuickPickItem & { action?: string }>();
+      let closed = false;
 
-      items.push({
-        label: `  $(sync) Refresh "${target.name}" usage now`,
-        description:
-          'Pull live 5h & weekly limits in background without switching',
-        action: 'refreshInactive'
-      });
+      const applyInactive = (syncing = false) => {
+        if (closed || this.disposed) return;
+        const planLabel = target.planOverride || cached?.plan || 'FREE';
+        const timeAgo = cached?.updatedAt
+          ? this.quotaService.formatTimeAgo(cached.updatedAt)
+          : syncing
+            ? 'syncing...'
+            : 'not yet synced';
+        const items: Array<vscode.QuickPickItem & { action?: string }> = [
+          ...buildCachedAntigravityRows(
+            cached,
+            planLabel,
+            syncing
+              ? `Fetching latest usage for "${target.name}"...`
+              : `No usage snapshot recorded for "${target.name}"`
+          ),
+          {
+            label: 'ACTIONS',
+            kind: vscode.QuickPickItemKind.Separator
+          },
+          {
+            label: `  $(sync) Refresh "${target.name}" usage now`,
+            description: 'Pull live 5h & weekly limits in background without switching',
+            action: 'refreshInactive'
+          },
+          {
+            label: `  $(arrow-swap) Switch to "${target.name}"`,
+            description: `Activate ${target.email}`,
+            action: 'switch'
+          }
+        ];
+        qp.title = `Charlier · ${target.name} (${planLabel} Plan)`;
+        qp.placeholder = `${target.email}  ·  ${
+          syncing ? 'Refreshing live snapshot...' : `Updated ${timeAgo}`
+        }  ·  Select an action or press Esc`;
+        qp.items = items;
+      };
 
-      items.push({
-        label: `  $(arrow-swap) Switch to "${target.name}"`,
-        description: `Activate ${target.email}`,
-        action: 'switch'
-      });
+      const runInactiveRefresh = (force: boolean) => {
+        qp.busy = true;
+        applyInactive(true);
+        void this.quotaService
+          .refreshInactiveProfile(target, this.vault, force)
+          .then((refreshed) => {
+            if (refreshed) {
+              cached = refreshed;
+              this.scheduleUpdate(60, true);
+              if (force) {
+                vscode.window.setStatusBarMessage(
+                  `$(check) Updated usage snapshot for "${target.name}".`,
+                  3000
+                );
+              }
+            } else if (force) {
+              vscode.window.showWarningMessage(
+                `Could not refresh "${target.name}" right now. Showing last saved snapshot.`
+              );
+            }
+          })
+          .catch(() => {})
+          .finally(() => {
+            if (!closed && !this.disposed) {
+              qp.busy = false;
+              applyInactive(false);
+            }
+          });
+      };
 
-      const choice = await vscode.window.showQuickPick(items, {
-        title: `Charlier · ${target.name} (${planLabel} Plan)`,
-        placeHolder: `${target.email}  ·  Updated ${timeAgo}  ·  Select an action or press Esc`
-      });
-
-      if (choice?.action === 'refreshInactive') {
-        vscode.window.setStatusBarMessage(
-          `$(sync~spin) Refreshing "${target.name}" usage...`,
-          2500
-        );
-        const updated = await this.quotaService.refreshInactiveProfile(
-          target,
-          this.vault,
-          true
-        );
-        await this.update();
-        if (updated) {
-          vscode.window.setStatusBarMessage(
-            `$(check) Updated usage snapshot for "${target.name}".`,
-            3000
-          );
-        } else {
-          vscode.window.showWarningMessage(
-            `Could not refresh "${target.name}" right now. Showing last saved snapshot.`
-          );
+      qp.onDidAccept(async () => {
+        const choice = qp.selectedItems[0];
+        if (!choice?.action) return;
+        if (choice.action === 'refreshInactive') {
+          runInactiveRefresh(true);
+          return;
         }
-        await this.showQuotaDetails(target.id, 'antigravity');
-      } else if (choice?.action === 'switch') {
-        await this.handleSwitch(target.id, 'antigravity');
+        qp.hide();
+        if (choice.action === 'switch') {
+          await this.handleSwitch(target.id, 'antigravity');
+        }
+      });
+      qp.onDidHide(() => {
+        closed = true;
+        qp.dispose();
+      });
+
+      const needsBgRefresh =
+        !cached || !cached.updatedAt || Date.now() - cached.updatedAt > 45_000;
+      applyInactive(needsBgRefresh);
+      qp.show();
+      if (needsBgRefresh) {
+        runInactiveRefresh(false);
       }
       return;
     }
 
-    const quota = await this.quotaService.getQuotaSummary(true);
-    if (!quota || quota.groups.length === 0) {
+    // Active Antigravity profile: open synchronously at 0ms from cached daemon/vault snapshot,
+    // then refresh live daemon telemetry in the background without blocking QuickPick open.
+    const resolveActiveProf = (): ProfileMetadata | null =>
+      target ||
+      (live.email
+        ? profiles.find((p) => p.email.toLowerCase() === live.email!.toLowerCase()) || null
+        : null);
+
+    let currentQuota: QuotaSummary | null =
+      this.quotaService.getCachedSummary() || this.lastFrame?.agy.quota || null;
+    const qp = vscode.window.createQuickPick<vscode.QuickPickItem & { action?: string }>();
+    let closed = false;
+
+    const applyActive = (syncing = false) => {
+      if (closed || this.disposed) return;
+      const activeProf = resolveActiveProf();
+      const targetEmail = activeProf?.email || live.email || currentQuota?.email || '';
+      const validQuota =
+        currentQuota &&
+        currentQuota.groups.length > 0 &&
+        (!currentQuota.email ||
+          !targetEmail ||
+          quotaMatchesIdentity(currentQuota.email, targetEmail))
+          ? currentQuota
+          : null;
+
       const unverifiedTarget =
-        (target?.authStatus === 'unverified' ? target : null) ||
+        (activeProf?.authStatus === 'unverified' ? activeProf : null) ||
         (live.email
           ? profiles.find(
               (p) =>
@@ -4677,160 +4765,208 @@ export class UIController implements vscode.Disposable {
                 p.authStatus === 'unverified'
             ) || null
           : null);
-      if (
+      const isUnverified = Boolean(
         live.authStatus === 'unverified' ||
-        quota?.authStatus === 'unverified' ||
-        unverifiedTarget
-      ) {
-        const action = await vscode.window.showWarningMessage(
-          'Google verification needed before Antigravity can report quota.',
-          'Verify Account'
-        );
-        if (action === 'Verify Account') {
-          await this.handleVerifyAccount(unverifiedTarget?.id || target?.id);
+          currentQuota?.authStatus === 'unverified' ||
+          unverifiedTarget
+      );
+
+      const planTier = (
+        activeProf?.planOverride ||
+        validQuota?.planTier ||
+        activeProf?.cachedQuota?.plan ||
+        'FREE'
+      ).toUpperCase();
+      const activeTitleName =
+        activeProf?.name ||
+        (live.email ? live.email.split('@')[0] : 'Active Session');
+
+      const items: Array<vscode.QuickPickItem & { action?: string }> = [];
+
+      if (validQuota) {
+        for (const group of validQuota.groups) {
+          const lowerGroup = group.displayName.toLowerCase();
+          const isArgon = lowerGroup.includes('argon');
+          const isCarbon = lowerGroup.includes('carbon');
+          const isClaudeGpt =
+            lowerGroup.includes('claude') || lowerGroup.includes('gpt');
+          const isGemini = lowerGroup.includes('gemini') && !isCarbon && !isArgon;
+          const isExtraPool = isCarbon || (!isArgon && !isClaudeGpt && !isGemini);
+
+          if (isArgon || (planTier === 'FREE' && (isExtraPool || isClaudeGpt))) {
+            continue;
+          }
+
+          const groupHeader = isCarbon
+            ? 'GEMINI 4 CARBON'
+            : isClaudeGpt
+              ? 'CLAUDE & GPT'
+              : isGemini
+                ? 'GEMINI'
+                : (group.displayName || 'EXTRA POOL').toUpperCase();
+
+          items.push({
+            label: groupHeader,
+            kind: vscode.QuickPickItemKind.Separator
+          });
+
+          const orderedBuckets = [...group.buckets].sort((a, b) =>
+            a.window === '5h' && b.window !== '5h'
+              ? -1
+              : b.window === '5h' && a.window !== '5h'
+                ? 1
+                : 0
+          );
+
+          for (const bucket of orderedBuckets) {
+            const is5h = bucket.window === '5h';
+            const windowTitle = is5h ? '5-Hour Fast Pool' : '7-Day Weekly Pool';
+            const icon = isExtraPool ? 'flame' : is5h ? 'pulse' : 'calendar';
+            const modelScope = isExtraPool
+              ? `${planTier === 'ULTRA' ? 'Ultra' : 'Pro'} allowance`
+              : isClaudeGpt
+                ? 'Opus & Sonnet'
+                : planTier === 'FREE'
+                  ? 'Hydrogen, Flash & Pro'
+                  : 'Hydrogen, Neon & Carbon';
+
+            if (bucket.disabled) {
+              items.push(
+                this.buildPoolRow(icon, windowTitle, '--', undefined, modelScope)
+              );
+            } else {
+              const percent = percentFromFraction(bucket.remainingFraction);
+              const pctStr = percent === null ? '--' : `${percent}%`;
+              items.push(
+                this.buildPoolRow(
+                  icon,
+                  windowTitle,
+                  pctStr,
+                  bucket.resetTime,
+                  modelScope
+                )
+              );
+            }
+          }
         }
+      } else if (isUnverified) {
+        items.push({
+          label: '  $(shield) Google verification required',
+          description: 'Complete verification in Antigravity to unlock live quota',
+          action: 'verifyAccount'
+        });
+      } else if (
+        activeProf?.cachedQuota &&
+        (activeProf.cachedQuota.gemini !== '--' ||
+          activeProf.cachedQuota.claudeGpt !== '--')
+      ) {
+        items.push(
+          ...buildCachedAntigravityRows(
+            activeProf.cachedQuota,
+            planTier,
+            'No usage snapshot recorded'
+          )
+        );
+      } else {
+        items.push({
+          label: syncing
+            ? '  $(sync~spin) Querying local Antigravity daemon...'
+            : '  $(info) No active quota reported by daemon',
+          description: syncing
+            ? 'Pulling live 5h & weekly windows'
+            : 'Click Refresh below once Antigravity finishes syncing'
+        });
+      }
+
+      items.push({
+        label: 'ACTIONS',
+        kind: vscode.QuickPickItemKind.Separator
+      });
+      if (isUnverified) {
+        items.push({
+          label: '  $(shield) Verify Account now',
+          description: 'Open Google verification flow',
+          action: 'verifyAccount'
+        });
+      }
+      items.push({
+        label: '  $(sync) Refresh live telemetry',
+        description: 'Query local Antigravity daemon in place',
+        action: 'refreshActive'
+      });
+
+      qp.title = `Charlier · ${activeTitleName} (${planTier} Plan · Active)`;
+      qp.placeholder = `${targetEmail ? `${targetEmail}  ·  ` : ''}${
+        syncing ? 'Refreshing live daemon telemetry...' : 'Live daemon telemetry'
+      }  ·  Press Esc to close`;
+      qp.items = items;
+    };
+
+    const runActiveRefresh = (force: boolean) => {
+      qp.busy = true;
+      applyActive(true);
+      void Promise.all([
+        this.vault.getLiveSessionInfoAsync().catch(() => live),
+        this.quotaService.getQuotaSummary(force).catch(() => null)
+      ])
+        .then(([freshLive, freshQuota]) => {
+          if (freshLive) live = freshLive;
+          if (freshQuota) currentQuota = freshQuota;
+          const activeProf = resolveActiveProf();
+          if (
+            activeProf &&
+            currentQuota &&
+            currentQuota.groups.length > 0 &&
+            currentQuota.email &&
+            quotaMatchesIdentity(currentQuota.email, activeProf.email)
+          ) {
+            const parsed = this.quotaService.parseMetrics(
+              currentQuota,
+              activeProf.planOverride
+            );
+            this.vault.updateProfileCachedQuota(activeProf.id, parsed);
+            activeProf.cachedQuota = parsed;
+            this.scheduleUpdate(60, true);
+          }
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (!closed && !this.disposed) {
+            qp.busy = false;
+            applyActive(false);
+          }
+        });
+    };
+
+    qp.onDidAccept(async () => {
+      const picked = qp.selectedItems[0];
+      if (!picked?.action) return;
+      if (picked.action === 'refreshActive') {
+        runActiveRefresh(true);
         return;
       }
-      vscode.window.showInformationMessage(
-        'No active quota reported by daemon.'
-      );
-      return;
-    }
-
-    if (!quota.email || !live.email || quota.email.toLowerCase() !== live.email.toLowerCase()) {
-      vscode.window.showInformationMessage('Quota is unavailable while Antigravity is syncing the active account.');
-      return;
-    }
-
-    const activeProf =
-      target ||
-      (live.email
-        ? profiles.find(
-            (p) => p.email.toLowerCase() === live.email!.toLowerCase()
-          ) || null
-        : null);
-
-    if (
-      activeProf &&
-      quota.email &&
-      activeProf.email.toLowerCase() === quota.email.toLowerCase()
-    ) {
-      const parsed = this.quotaService.parseMetrics(
-        quota,
-        activeProf.planOverride
-      );
-      this.vault.updateProfileCachedQuota(activeProf.id, parsed);
-    }
-
-    const planTier = activeProf?.planOverride || quota.planTier;
-    const activeTitleName =
-      activeProf?.name ||
-      (live.email ? live.email.split('@')[0] : 'Active Session');
-    const activeEmail = activeProf?.email || live.email || quota.email || '';
-
-    const items: Array<vscode.QuickPickItem & { action?: string }> = [];
-
-    for (const group of quota.groups) {
-      const lowerGroup = group.displayName.toLowerCase();
-      const isArgon = lowerGroup.includes('argon');
-      const isCarbon = lowerGroup.includes('carbon');
-      const isClaudeGpt =
-        lowerGroup.includes('claude') ||
-        lowerGroup.includes('gpt');
-
-      if (planTier === 'FREE' && (isArgon || isCarbon || isClaudeGpt)) {
-        continue;
+      qp.hide();
+      if (picked.action === 'verifyAccount') {
+        const activeProf = resolveActiveProf();
+        await this.handleVerifyAccount(activeProf?.id || target?.id);
       }
-
-      const groupHeader = isArgon
-        ? 'GEMINI 4 ARGON'
-        : isCarbon
-          ? 'GEMINI 4 CARBON'
-          : isClaudeGpt
-            ? 'CLAUDE & GPT'
-            : 'GEMINI';
-
-      items.push({
-        label: groupHeader,
-        kind: vscode.QuickPickItemKind.Separator
-      });
-
-      const orderedBuckets = [...group.buckets].sort((a, b) =>
-        a.window === '5h' && b.window !== '5h'
-          ? -1
-          : b.window === '5h' && a.window !== '5h'
-            ? 1
-            : 0
-      );
-
-      for (const bucket of orderedBuckets) {
-        const is5h = bucket.window === '5h';
-        const windowTitle = is5h ? '5-Hour Fast Pool' : '7-Day Weekly Pool';
-        const icon = isArgon || isCarbon ? 'flame' : is5h ? 'pulse' : 'calendar';
-        const modelScope =
-          isArgon || isCarbon
-            ? 'Pro weekly allowance'
-            : isClaudeGpt
-              ? 'Opus, Sonnet, GPT-OSS'
-              : planTier === 'ULTRA'
-                ? 'Flash, Pro & Carbon'
-                : 'Flash & Pro';
-
-        if (bucket.disabled) {
-          items.push(
-            this.buildPoolRow(icon, windowTitle, '--', undefined, modelScope)
-          );
-        } else {
-          const percent = percentFromFraction(bucket.remainingFraction);
-          const pctStr = percent === null ? '--' : `${percent}%`;
-          items.push(
-            this.buildPoolRow(
-              icon,
-              windowTitle,
-              pctStr,
-              bucket.resetTime,
-              modelScope
-            )
-          );
-        }
-      }
-    }
-
-    if (planTier === 'ULTRA' && !quota.hasArgonGroup) {
-      items.push({
-        label: 'GEMINI 4 ARGON & CARBON',
-        kind: vscode.QuickPickItemKind.Separator
-      });
-      items.push(
-        this.buildPoolRow(
-          'sparkle',
-          'Unified Ultra Pool',
-          'incl.',
-          undefined,
-          'Bundled with Gemini 5h & 7d pools'
-        )
-      );
-    }
-
-    items.push({
-      label: 'ACTIONS',
-      kind: vscode.QuickPickItemKind.Separator
     });
-    items.push({
-      label: '  $(sync) Refresh live telemetry',
-      description: 'Query local Antigravity daemon and vault snapshots',
-      action: 'refreshActive'
+    qp.onDidHide(() => {
+      closed = true;
+      qp.dispose();
     });
 
-    const picked = await vscode.window.showQuickPick(items, {
-      title: `Charlier · ${activeTitleName} (${planTier} Plan · Active)`,
-      placeHolder: `${activeEmail ? `${activeEmail}  ·  ` : ''}Live daemon telemetry  ·  Press Esc to close`,
-      canPickMany: false
-    });
-
-    if (picked?.action === 'refreshActive') {
-      await this.refreshQuota('antigravity');
-      await this.showQuotaDetails(activeProf?.id, 'antigravity');
+    const summaryAgeMs = currentQuota?.fetchedAt
+      ? Date.now() - currentQuota.fetchedAt
+      : Infinity;
+    const needsBgRefresh =
+      !currentQuota ||
+      currentQuota.groups.length === 0 ||
+      summaryAgeMs > 15_000;
+    applyActive(needsBgRefresh);
+    qp.show();
+    if (needsBgRefresh) {
+      runActiveRefresh(false);
     }
   }
 
@@ -4919,53 +5055,99 @@ export class UIController implements vscode.Disposable {
 
     if (!target) {
       if (live.email || live.accountId) {
-        vscode.window.setStatusBarMessage(
-          `$(sync~spin) Querying OpenAI Codex usage for "${live.email || live.accountId}"...`,
-          2000
-        );
-        const activeRes = await this.codexQuotaService.getActiveQuotaSummary(
-          this.codexVault,
-          true
-        );
         const liveHealth = (this.codexQuotaService as any).getActiveAuthHealth?.(live);
         const liveIsStale =
           live.authStatus === 'revoked' ||
           live.authStatus === 'expired' ||
           liveHealth?.authStatus === 'revoked' ||
           liveHealth?.authStatus === 'expired';
-        const cached = codexMetricForDisplay(
-          liveIsStale
-            ? activeRes.metric || undefined
-            : healExpiredCodexMetric(activeRes.metric || undefined),
+        const initialRaw =
+          this.codexQuotaService.getCachedMetric() ||
+          this.lastFrame?.codex.metrics ||
+          undefined;
+        let cached = codexMetricForDisplay(
+          liveIsStale ? initialRaw : healExpiredCodexMetric(initialRaw),
           live.authMode
         );
-        const planLabel = (cached?.plan || live.planTier || 'FREE').toUpperCase();
-        const items: Array<vscode.QuickPickItem & { action?: string }> = [
-          ...this.buildCodexWindowQuickPickRows(cached, planLabel),
-          {
-            label: 'ACTIONS',
-            kind: vscode.QuickPickItemKind.Separator
-          },
-          {
-            label: '  $(add) Save active Codex session to Vault',
-            description: live.email || live.accountId || '',
-            action: 'saveCodex'
-          },
-          {
-            label: '  $(sync) Refresh live usage now',
-            description: 'Query live chatgpt.com/backend-api/wham/usage',
-            action: 'refreshUnsaved'
+        const qp = vscode.window.createQuickPick<vscode.QuickPickItem & { action?: string }>();
+        let closed = false;
+
+        const applyUnsaved = (syncing = false) => {
+          if (closed || this.disposed) return;
+          const planLabel = (cached?.plan || live.planTier || 'FREE').toUpperCase();
+          const items: Array<vscode.QuickPickItem & { action?: string }> = [
+            ...this.buildCodexWindowQuickPickRows(cached, planLabel),
+            {
+              label: 'ACTIONS',
+              kind: vscode.QuickPickItemKind.Separator
+            },
+            {
+              label: '  $(add) Save active Codex session to Vault',
+              description: live.email || live.accountId || '',
+              action: 'saveCodex'
+            },
+            {
+              label: '  $(sync) Refresh live usage now',
+              description: 'Query live chatgpt.com/backend-api/wham/usage',
+              action: 'refreshUnsaved'
+            }
+          ];
+          qp.title = `Charlier · Codex · ${live.email || 'Active'} (${planLabel} Plan · Unsaved)`;
+          qp.placeholder = `${live.email || ''}  ·  ${
+            syncing ? 'Refreshing live wham/usage...' : 'Unsaved active session'
+          }  ·  Select an action or press Esc`;
+          qp.items = items;
+        };
+
+        const runUnsavedRefresh = (force: boolean) => {
+          qp.busy = true;
+          applyUnsaved(true);
+          void this.codexQuotaService
+            .getActiveQuotaSummary(this.codexVault, force)
+            .then((activeRes) => {
+              if (activeRes?.metric) {
+                cached = codexMetricForDisplay(
+                  liveIsStale
+                    ? activeRes.metric
+                    : healExpiredCodexMetric(activeRes.metric),
+                  live.authMode
+                );
+                this.scheduleUpdate(60, true);
+              }
+            })
+            .catch(() => {})
+            .finally(() => {
+              if (!closed && !this.disposed) {
+                qp.busy = false;
+                applyUnsaved(false);
+              }
+            });
+        };
+
+        qp.onDidAccept(async () => {
+          const choice = qp.selectedItems[0];
+          if (!choice?.action) return;
+          if (choice.action === 'refreshUnsaved') {
+            runUnsavedRefresh(true);
+            return;
           }
-        ];
-        const choice = await vscode.window.showQuickPick(items, {
-          title: `Charlier · Codex · ${live.email || 'Active'} (${planLabel} Plan · Unsaved)`,
-          placeHolder: `${live.email || ''}  ·  Unsaved active session  ·  Select an action or press Esc`
+          qp.hide();
+          if (choice.action === 'saveCodex') {
+            await this.handleSaveCurrent('codex');
+          }
         });
-        if (choice?.action === 'saveCodex') {
-          await this.handleSaveCurrent('codex');
-        } else if (choice?.action === 'refreshUnsaved') {
-          await this.update();
-          await this.showCodexQuotaDetails();
+        qp.onDidHide(() => {
+          closed = true;
+          qp.dispose();
+        });
+
+        const needsBgRefresh =
+          live.authMode !== 'apikey' &&
+          (!cached || !cached.updatedAt || Date.now() - cached.updatedAt > 15_000);
+        applyUnsaved(needsBgRefresh);
+        qp.show();
+        if (needsBgRefresh) {
+          runUnsavedRefresh(false);
         }
         return;
       }
@@ -4978,122 +5160,170 @@ export class UIController implements vscode.Disposable {
     const isTargetActive = Boolean(activeProf && activeProf.id === target.id);
     const targetNeedsReauth =
       target.authStatus === 'revoked' || target.authStatus === 'expired';
+    const liveActiveMetric = isTargetActive
+      ? this.codexQuotaService.getCachedMetric() ||
+        this.lastFrame?.codex.metrics ||
+        null
+      : null;
+    const bestRawMetric =
+      liveActiveMetric &&
+      (!target.cachedQuota?.updatedAt ||
+        (liveActiveMetric.updatedAt || 0) >= target.cachedQuota.updatedAt)
+        ? liveActiveMetric
+        : target.cachedQuota;
     let cached = codexMetricForDisplay(
-      targetNeedsReauth
-        ? target.cachedQuota
-        : healExpiredCodexMetric(target.cachedQuota),
+      targetNeedsReauth ? bestRawMetric : healExpiredCodexMetric(bestRawMetric),
       target.authMode
     );
 
-    if (
+    const qp = vscode.window.createQuickPick<vscode.QuickPickItem & { action?: string }>();
+    let closed = false;
+
+    const applySaved = (syncing = false) => {
+      if (closed || this.disposed) return;
+      const planLabel = (
+        target.planOverride ||
+        cached?.plan ||
+        (target.authMode === 'apikey' ? 'API_KEY' : 'PLUS')
+      ).toUpperCase();
+      const timeAgo = cached?.updatedAt
+        ? formatTimeAgo(cached.updatedAt)
+        : syncing
+          ? 'syncing...'
+          : 'not yet synced';
+
+      const items: Array<vscode.QuickPickItem & { action?: string }> = [
+        ...this.buildCodexWindowQuickPickRows(cached, planLabel),
+        {
+          label: 'ACTIONS',
+          kind: vscode.QuickPickItemKind.Separator
+        },
+        {
+          label: `  $(sync) Refresh "${target.name}" usage now`,
+          description: 'Query live chatgpt.com/backend-api/wham/usage',
+          action: 'refreshCodex'
+        }
+      ];
+
+      if (!isTargetActive) {
+        items.push({
+          label: `  $(arrow-swap) Switch to "${target.name}" (IDE + CLI)`,
+          description: `Activate ${target.email}`,
+          action: 'switch'
+        });
+        items.push({
+          label: `  $(terminal) Switch CLI Only to "${target.name}"`,
+          description: 'Launch isolated CODEX_HOME terminal with zero IDE reload',
+          action: 'switchCliOnly'
+        });
+      }
+
+      qp.title = `Charlier · Codex · ${target.name} (${planLabel} Plan${isTargetActive ? ' · Active' : ''})`;
+      qp.placeholder = `${target.email}  ·  ${
+        syncing ? 'Refreshing live wham/usage...' : `Updated ${timeAgo}`
+      }  ·  Select an action or press Esc`;
+      qp.items = items;
+    };
+
+    const runSavedRefresh = (force: boolean) => {
+      qp.busy = true;
+      applySaved(true);
+      const task = isTargetActive
+        ? this.codexQuotaService
+            .getActiveQuotaSummary(this.codexVault, force)
+            .then((r) => r?.metric || null)
+        : this.codexQuotaService.refreshProfileQuota(target.id, this.codexVault, force);
+      void task
+        .then((refreshed) => {
+          if (refreshed) {
+            cached = codexMetricForDisplay(refreshed, target.authMode);
+            this.scheduleUpdate(60, true);
+          }
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (!closed && !this.disposed) {
+            qp.busy = false;
+            applySaved(false);
+          }
+        });
+    };
+
+    qp.onDidAccept(async () => {
+      const choice = qp.selectedItems[0];
+      if (!choice?.action) return;
+      if (choice.action === 'refreshCodex') {
+        runSavedRefresh(true);
+        return;
+      }
+      qp.hide();
+      if (choice.action === 'switch') {
+        await this.handleSwitch(target.id, 'codex', false);
+      } else if (choice.action === 'switchCliOnly') {
+        await this.handleSwitch(target.id, 'codex', true);
+      }
+    });
+    qp.onDidHide(() => {
+      closed = true;
+      qp.dispose();
+    });
+
+    const staleThresholdMs = isTargetActive ? 15_000 : 45_000;
+    const needsBgRefresh =
       target.authMode !== 'apikey' &&
       cached?.plan !== 'API_KEY' &&
-      (!cached || !cached.updatedAt || Date.now() - cached.updatedAt > 45000)
-    ) {
-      vscode.window.setStatusBarMessage(
-        `$(sync~spin) Querying OpenAI Codex usage for "${target.name}"...`,
-        2000
-      );
-      const refreshed = await this.codexQuotaService.refreshProfileQuota(
-        target.id,
-        this.codexVault
-      );
-      if (refreshed) {
-        cached = codexMetricForDisplay(refreshed, target.authMode);
-        await this.update();
-      }
-    }
-
-    const planLabel = (
-      target.planOverride ||
-      cached?.plan ||
-      (target.authMode === 'apikey' ? 'API_KEY' : 'PLUS')
-    ).toUpperCase();
-    const timeAgo = cached?.updatedAt
-      ? formatTimeAgo(cached.updatedAt)
-      : 'not yet synced';
-
-    const items: Array<vscode.QuickPickItem & { action?: string }> = [
-      ...this.buildCodexWindowQuickPickRows(cached, planLabel)
-    ];
-
-    items.push({
-      label: 'ACTIONS',
-      kind: vscode.QuickPickItemKind.Separator
-    });
-
-    items.push({
-      label: `  $(sync) Refresh "${target.name}" usage now`,
-      description: 'Query live chatgpt.com/backend-api/wham/usage',
-      action: 'refreshCodex'
-    });
-
-    if (!isTargetActive) {
-      items.push({
-        label: `  $(arrow-swap) Switch to "${target.name}" (IDE + CLI)`,
-        description: `Activate ${target.email}`,
-        action: 'switch'
-      });
-      items.push({
-        label: `  $(terminal) Switch CLI Only to "${target.name}"`,
-        description: 'Swap ~/.codex/auth.json with zero Extension Host reload',
-        action: 'switchCliOnly'
-      });
-    }
-
-    const choice = await vscode.window.showQuickPick(items, {
-      title: `Charlier · Codex · ${target.name} (${planLabel} Plan${isTargetActive ? ' · Active' : ''})`,
-      placeHolder: `${target.email}  ·  Updated ${timeAgo}  ·  Select an action or press Esc`
-    });
-
-    if (choice?.action === 'refreshCodex') {
-      vscode.window.setStatusBarMessage(
-        `$(sync~spin) Refreshing "${target.name}" Codex usage...`,
-        2500
-      );
-      await this.codexQuotaService.refreshProfileQuota(
-        target.id,
-        this.codexVault
-      );
-      await this.update();
-      await this.showCodexQuotaDetails(target.id);
-    } else if (choice?.action === 'switch') {
-      await this.handleSwitch(target.id, 'codex', false);
-    } else if (choice?.action === 'switchCliOnly') {
-      await this.handleSwitch(target.id, 'codex', true);
+      (!cached || !cached.updatedAt || Date.now() - cached.updatedAt > staleThresholdMs);
+    applySaved(needsBgRefresh);
+    qp.show();
+    if (needsBgRefresh) {
+      runSavedRefresh(false);
     }
   }
 
   public async refreshQuota(
     providerOverride?: ActiveProviderId
   ): Promise<void> {
+    const refreshAgy = !providerOverride || providerOverride === 'antigravity';
+    const refreshCodex = !providerOverride || providerOverride === 'codex';
+    const scopeLabel =
+      refreshAgy && refreshCodex
+        ? 'Antigravity and Codex vaults'
+        : refreshAgy
+          ? 'Antigravity vault'
+          : 'Codex vault';
+
     vscode.window.setStatusBarMessage(
-      '$(sync~spin) Refreshing limits across Antigravity and Codex vaults...',
+      `$(sync~spin) Refreshing limits across ${scopeLabel}...`,
       2500
     );
 
-    this.quotaService.invalidate();
-    this.codexQuotaService.invalidateCache();
+    const tasks: Array<Promise<unknown>> = [];
+    if (refreshAgy) {
+      this.quotaService.invalidate();
+      const agyProfiles = this.vault.listProfiles();
+      const agyLive = await this.vault.getLiveSessionInfoAsync();
+      const agyState = this.vault.getState();
+      tasks.push(
+        this.quotaService.getQuotaSummary(true),
+        this.quotaService.refreshAllInactiveProfiles(
+          agyProfiles,
+          agyLive.email,
+          agyState.activeProfileId,
+          this.vault,
+          true
+        )
+      );
+    }
+    if (refreshCodex) {
+      this.codexQuotaService.invalidateCache();
+      tasks.push(this.codexQuotaService.refreshAllProfiles(this.codexVault));
+    }
 
-    const agyProfiles = this.vault.listProfiles();
-    const agyLive = await this.vault.getLiveSessionInfoAsync();
-    const agyState = this.vault.getState();
-
-    await Promise.allSettled([
-      this.quotaService.getQuotaSummary(true),
-      this.quotaService.refreshAllInactiveProfiles(
-        agyProfiles,
-        agyLive.email,
-        agyState.activeProfileId,
-        this.vault,
-        true
-      ),
-      this.codexQuotaService.refreshAllProfiles(this.codexVault)
-    ]);
+    await Promise.allSettled(tasks);
 
     await this.update();
     vscode.window.setStatusBarMessage(
-      '$(check) Limits refreshed across Antigravity and Codex vaults.',
+      `$(check) Limits refreshed across ${scopeLabel}.`,
       3500
     );
   }

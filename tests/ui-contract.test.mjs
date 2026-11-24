@@ -95,9 +95,9 @@ test('unified Antigravity status bar pill colors by tier-aware average and surfa
   assert.equal(controller.statusBarItem.color, undefined);
   assert.match(controller.statusBarItem.accessibilityInformation.label, /depleted/);
 
-  const proProf = { ...profile, cachedQuota: { plan: 'PRO', gemini: '75%', claudeGpt: '50%', argon: '6%', updatedAt: Date.now() } };
+  const proProf = { ...profile, cachedQuota: { plan: 'PRO', gemini: '60%', claudeGpt: '30%', argon: '100%', updatedAt: Date.now() } };
   controller.updateAntigravityStatusBar([proProf], proProf, live, true, null, false, true);
-  assert.equal(controller.statusBarItem.text, '$(charlier-antigravity-star) Active · G 75% · C 50% · A 6%');
+  assert.equal(controller.statusBarItem.text, '$(charlier-antigravity-star) Active · G 60% · C 30%');
   assert.equal(controller.statusBarItem.color.id, 'charlier.quotaWarn');
 
   const critProf = { ...profile, cachedQuota: { plan: 'PRO', gemini: '12%', claudeGpt: '10%', argon: '8%', updatedAt: Date.now() } };
@@ -2197,6 +2197,358 @@ test('UIController hybrid auto-refresh: updates active Hero & CLI CLAIMED on foc
     assert.equal(codexHeroPulls, beforePush);
     assert.ok(renders.length > beforeRenders);
   } finally {
+    controller.dispose();
+  }
+});
+
+test('UIController.handleSwitch prefers zero-kill hydrateActiveDaemonInPlace on Antigravity and runs hotSwapCodexAppServer before refreshProfileQuota on Codex', async () => {
+  const order = [];
+  let respawnCalls = 0;
+  let hydrateResult = 'hydrated';
+
+  const agyProfiles = [
+    { id: 'a1', name: 'Hero', email: 'a1@charlier.dev', authStatus: 'ok', updatedAt: Date.now(), cachedQuota: { plan: 'PRO', gemini: '80%', claudeGpt: '80%', argon: '--', updatedAt: Date.now() } },
+    { id: 'a2', name: 'Target', email: 'a2@charlier.dev', authStatus: 'ok', updatedAt: Date.now() - 100, cachedQuota: { plan: 'PRO', gemini: '95%', claudeGpt: '90%', argon: '--', updatedAt: Date.now() } }
+  ];
+  const codexProfiles = [
+    { id: 'c1', name: 'Codex1', email: 'c1@charlier.dev', authMode: 'chatgpt', authStatus: 'ok', updatedAt: Date.now(), cachedQuota: { plan: 'PLUS', codex5h: '80%', codex7d: '80%', argon: '--', updatedAt: Date.now() } },
+    { id: 'c2', name: 'Codex2', email: 'c2@charlier.dev', authMode: 'chatgpt', authStatus: 'ok', updatedAt: Date.now() - 100, cachedQuota: { plan: 'PLUS', codex5h: '90%', codex7d: '90%', argon: '--', updatedAt: Date.now() } }
+  ];
+
+  const controller = new UIController(
+    {
+      getState: () => ({ selectedProvider: 'antigravity', activeProfileId: 'a1', activeCodexProfileId: 'c1' }),
+      listProfiles: () => agyProfiles,
+      getLiveSessionInfoAsync: async () => ({ email: 'a1@charlier.dev', hasOAuthCreds: true }),
+      autoSaveUnsavedActiveSessionAsync: async () => null,
+      switchProfile: async (id) => agyProfiles.find((p) => p.id === id),
+      updateProfileCachedQuota: () => {},
+      setActiveCodexProfileId: () => {}
+    },
+    {
+      getCachedSummary: () => null,
+      invalidate: () => {},
+      hydrateActiveDaemonInPlace: async (_email, cb) => {
+        order.push('agy:hydrate');
+        if (hydrateResult === 'hydrated') cb?.();
+        return hydrateResult;
+      },
+      respawnActiveDaemon: async () => {
+        respawnCalls++;
+        order.push('agy:respawn');
+        return 'respawned';
+      },
+      refreshInactiveProfile: async () => null,
+      getQuotaSummary: async () => null,
+      parseMetrics: () => ({ plan: 'PRO', gemini: '95%', claudeGpt: '90%', argon: '--', updatedAt: Date.now() }),
+      buildAccountsHoverTooltip: () => 'hover'
+    },
+    {
+      listProfiles: () => codexProfiles,
+      getLiveSessionInfo: () => ({ email: 'c1@charlier.dev', hasOAuthCreds: true }),
+      findMatchingProfile: () => codexProfiles[0],
+      autoSaveUnsavedActiveSession: () => null,
+      updateProfileCachedQuota: () => {},
+      switchProfile: async (id) => codexProfiles.find((p) => p.id === id)
+    },
+    {
+      getCachedMetric: () => codexProfiles[0].cachedQuota,
+      primeActiveAccountKey: () => {},
+      invalidateCache: () => {},
+      hotSwapCodexAppServer: async () => {
+        order.push('codex:hotswap');
+        return 'swapped';
+      },
+      refreshProfileQuota: async (id) => {
+        order.push(`codex:refresh:${id}`);
+        return null;
+      },
+      buildCodexHoverTooltip: () => 'codex-hover'
+    }
+  );
+  controller.update = async () => {};
+
+  try {
+    await controller.handleSwitch('a2', 'antigravity', false);
+    assert.equal(respawnCalls, 0, 'successful in-place HasAuthToken hydration must NOT kill/respawn agy');
+
+    hydrateResult = 'needs-respawn';
+    await controller.handleSwitch('a2', 'antigravity', false);
+    assert.equal(respawnCalls, 1, 'needs-respawn must fall back cleanly to surgical respawnActiveDaemon');
+
+    order.length = 0;
+    await controller.handleSwitch('c2', 'codex', false);
+    assert.equal(order[0], 'codex:hotswap', 'hotSwapCodexAppServer must finish BEFORE refreshProfileQuota to prevent RTR races');
+    assert.ok(order.includes('codex:refresh:c2'));
+  } finally {
+    controller.dispose();
+  }
+});
+
+test('showQuotaDetails & showCodexQuotaDetails open synchronously at 0ms from cache, live-update in place, honor refreshQuota providerOverride, and skip idle hover repaints', async () => {
+  const createdQps = [];
+  const prevCreateQuickPick = vscode.window.createQuickPick;
+  const prevSetStatusBarMessage = vscode.window.setStatusBarMessage;
+  vscode.window.setStatusBarMessage = () => ({ dispose() {} });
+  vscode.window.createQuickPick = () => {
+    const acceptCbs = [];
+    const hideCbs = [];
+    const qp = {
+      title: '',
+      placeholder: '',
+      items: [],
+      selectedItems: [],
+      busy: false,
+      shownAt: 0,
+      hidden: false,
+      disposed: false,
+      show() {
+        qp.shownAt = Date.now();
+      },
+      hide() {
+        qp.hidden = true;
+        for (const cb of hideCbs) cb();
+      },
+      dispose() {
+        qp.disposed = true;
+      },
+      onDidAccept(cb) {
+        acceptCbs.push(cb);
+        return { dispose() {} };
+      },
+      onDidHide(cb) {
+        hideCbs.push(cb);
+        return { dispose() {} };
+      },
+      onDidTriggerItemButton() {
+        return { dispose() {} };
+      }
+    };
+    createdQps.push(qp);
+    return qp;
+  };
+
+  let agyDaemonCalls = 0;
+  let agyDaemonDone = false;
+  let agyInactiveCalls = 0;
+  let agyInactiveDone = false;
+  let codexAllCalls = 0;
+  let codexProfileCalls = 0;
+  let codexProfileDone = false;
+  let scheduleUpdateCalls = 0;
+
+  const agyProfiles = [
+    {
+      id: 'a-active',
+      name: 'ActivePro',
+      email: 'active@charlier.dev',
+      updatedAt: Date.now(),
+      cachedQuota: {
+        plan: 'PRO',
+        gemini: '80%',
+        gemini5h: '80%',
+        gemini7d: '90%',
+        claudeGpt: '70%',
+        claude5h: '70%',
+        claude7d: '85%',
+        argon: '--',
+        updatedAt: Date.now() - 120_000
+      }
+    },
+    {
+      id: 'a-standby',
+      name: 'StandbyPro',
+      email: 'standby@charlier.dev',
+      updatedAt: Date.now() - 1000,
+      cachedQuota: {
+        plan: 'PRO',
+        gemini: '65%',
+        gemini5h: '65%',
+        gemini7d: '80%',
+        claudeGpt: '60%',
+        claude5h: '60%',
+        claude7d: '75%',
+        argon: '--',
+        updatedAt: Date.now() - 120_000
+      }
+    }
+  ];
+  const codexProfiles = [
+    {
+      id: 'c-standby',
+      name: 'CodexStandby',
+      email: 'codex@charlier.dev',
+      authMode: 'chatgpt',
+      updatedAt: Date.now(),
+      cachedQuota: {
+        plan: 'PLUS',
+        gemini: '55%',
+        claudeGpt: '88%',
+        argon: '--',
+        codex5h: '55%',
+        codex7d: '88%',
+        codexResetCredits: 2,
+        updatedAt: Date.now() - 120_000
+      }
+    }
+  ];
+
+  const controller = new UIController(
+    {
+      getState: () => ({ selectedProvider: 'antigravity', activeProfileId: 'a-active', activeCodexProfileId: null }),
+      listProfiles: () => agyProfiles,
+      getLiveSessionInfo: () => ({ email: 'active@charlier.dev', hasOAuthCreds: true }),
+      getLiveSessionInfoAsync: async () => ({ email: 'active@charlier.dev', hasOAuthCreds: true }),
+      updateProfileCachedQuota: () => {}
+    },
+    {
+      getCachedSummary: () => ({
+        email: 'active@charlier.dev',
+        planTier: 'PRO',
+        fetchedAt: Date.now() - 60_000,
+        groups: [
+          { displayName: 'Gemini Models', buckets: [{ window: '5h', remainingFraction: 0.8 }] },
+          { displayName: 'Claude and GPT models', buckets: [{ window: '5h', remainingFraction: 0.7 }] }
+        ]
+      }),
+      getQuotaSummary: async () => {
+        agyDaemonCalls++;
+        agyDaemonDone = false;
+        await new Promise((r) => setTimeout(r, 120));
+        agyDaemonDone = true;
+        return {
+          email: 'active@charlier.dev',
+          planTier: 'PRO',
+          fetchedAt: Date.now(),
+          groups: [
+            { displayName: 'Gemini Models', buckets: [{ window: '5h', remainingFraction: 0.92 }] },
+            { displayName: 'Claude and GPT models', buckets: [{ window: '5h', remainingFraction: 0.84 }] }
+          ]
+        };
+      },
+      refreshInactiveProfile: async () => {
+        agyInactiveCalls++;
+        agyInactiveDone = false;
+        await new Promise((r) => setTimeout(r, 120));
+        agyInactiveDone = true;
+        return {
+          plan: 'PRO',
+          gemini: '99%',
+          gemini5h: '99%',
+          gemini7d: '99%',
+          claudeGpt: '95%',
+          claude5h: '95%',
+          claude7d: '95%',
+          argon: '--',
+          updatedAt: Date.now()
+        };
+      },
+      refreshAllInactiveProfiles: async () => {
+        agyInactiveCalls++;
+      },
+      invalidate: () => {},
+      formatTimeAgo: () => '1m ago',
+      formatResetCompact: () => '2h',
+      renderLinenMeter: () => '▓▓▓▓▓▓░░',
+      parseMetrics: () => ({ plan: 'PRO', gemini: '92%', claudeGpt: '84%', argon: '--', updatedAt: Date.now() }),
+      buildAccountsHoverTooltip: () => 'hover'
+    },
+    {
+      listProfiles: () => codexProfiles,
+      getLiveSessionInfo: () => ({ email: null, accountId: null, hasOAuthCreds: false }),
+      findMatchingProfile: () => null
+    },
+    {
+      getCachedMetric: () => null,
+      invalidateCache: () => {},
+      refreshProfileQuota: async () => {
+        codexProfileCalls++;
+        codexProfileDone = false;
+        await new Promise((r) => setTimeout(r, 120));
+        codexProfileDone = true;
+        return {
+          plan: 'PLUS',
+          gemini: '77%',
+          claudeGpt: '91%',
+          argon: '--',
+          codex5h: '77%',
+          codex7d: '91%',
+          codexResetCredits: 3,
+          updatedAt: Date.now()
+        };
+      },
+      refreshAllProfiles: async () => {
+        codexAllCalls++;
+        return 1;
+      },
+      buildCodexHoverTooltip: () => 'codex-hover'
+    }
+  );
+  controller.update = async () => {};
+  const origSchedule = controller.scheduleUpdate.bind(controller);
+  controller.scheduleUpdate = (...args) => {
+    scheduleUpdateCalls++;
+    return origSchedule(...args);
+  };
+
+  try {
+    // 1. Active Antigravity details opens at 0ms before 120ms daemon refresh finishes, then live-updates
+    await controller.showQuotaDetails('a-active', 'antigravity');
+    const agyActiveQp = createdQps[createdQps.length - 1];
+    assert.ok(agyActiveQp.shownAt > 0, 'Active Antigravity Quota Details must call qp.show()');
+    assert.equal(agyDaemonDone, false, 'Active Antigravity Quota Details must open synchronously before daemon RPC resolves');
+    assert.ok(agyActiveQp.items.some((i) => i.label.includes('80%')), 'Cached 80% Gemini must display immediately');
+    assert.equal(agyActiveQp.busy, true, 'Stale active details should refresh quietly in background');
+    await new Promise((r) => setTimeout(r, 180));
+    assert.equal(agyDaemonDone, true);
+    assert.equal(agyActiveQp.busy, false);
+    assert.ok(agyActiveQp.items.some((i) => i.label.includes('92%')), 'Background daemon refresh must update QuickPick items in place');
+    agyActiveQp.hide();
+
+    // 2. Inactive Antigravity details opens at 0ms before 120ms Cloud Code HTTPS finishes
+    await controller.showQuotaDetails('a-standby', 'antigravity');
+    const agyStandbyQp = createdQps[createdQps.length - 1];
+    assert.ok(agyStandbyQp.shownAt > 0, 'Inactive Antigravity Quota Details must call qp.show()');
+    assert.equal(agyInactiveDone, false, 'Inactive Antigravity Quota Details must open synchronously before Cloud Code HTTPS resolves');
+    assert.ok(agyStandbyQp.items.some((i) => i.label.includes('65%')), 'Cached 65% standby snapshot must display immediately');
+    await new Promise((r) => setTimeout(r, 180));
+    assert.equal(agyInactiveDone, true);
+    assert.ok(agyStandbyQp.items.some((i) => i.label.includes('99%')), 'Refreshed 99% standby usage must patch QuickPick in place');
+    agyStandbyQp.hide();
+
+    // 3. Codex saved details opens at 0ms before 120ms wham/usage finishes
+    await controller.showQuotaDetails('c-standby', 'codex');
+    const codexQp = createdQps[createdQps.length - 1];
+    assert.ok(codexQp.shownAt > 0, 'Codex Quota Details must call qp.show()');
+    assert.equal(codexProfileDone, false, 'Codex Quota Details must open synchronously before wham/usage resolves');
+    assert.ok(codexQp.items.some((i) => i.label.includes('55%')), 'Cached 55% Codex 5h pool must display immediately');
+    await new Promise((r) => setTimeout(r, 180));
+    assert.equal(codexProfileDone, true);
+    assert.ok(codexQp.items.some((i) => i.label.includes('77%')), 'Fresh 77% Codex usage must patch QuickPick in place');
+    assert.equal(codexProfileCalls, 1);
+    codexQp.hide();
+
+    // 4. refreshQuota honors providerOverride without refreshing the other provider
+    const prevCodexAll = codexAllCalls;
+    const prevAgyDaemon = agyDaemonCalls;
+    await controller.refreshQuota('antigravity');
+    assert.equal(agyDaemonCalls, prevAgyDaemon + 1);
+    assert.equal(codexAllCalls, prevCodexAll, 'refreshQuota("antigravity") must NOT refresh Codex vault');
+    await controller.refreshQuota('codex');
+    assert.equal(codexAllCalls, prevCodexAll + 1);
+    assert.equal(agyDaemonCalls, prevAgyDaemon + 1, 'refreshQuota("codex") must NOT hit Antigravity daemon');
+
+    // 5. Idle runAutoRefreshTick with zero due tasks must NOT trigger hover-flickering scheduleUpdate
+    controller.sidebarVisible = true;
+    controller.windowFocused = true;
+    controller.lastStandbyAutoRefreshAt = Date.now();
+    controller.quotaService.getCachedSummary = () => ({ fetchedAt: Date.now(), groups: [] });
+    const beforeIdleSchedule = scheduleUpdateCalls;
+    await controller.runAutoRefreshTick();
+    assert.equal(scheduleUpdateCalls, beforeIdleSchedule, 'idle tick with no refreshed tasks must not schedule hover-churning repaint');
+  } finally {
+    vscode.window.createQuickPick = prevCreateQuickPick;
+    vscode.window.setStatusBarMessage = prevSetStatusBarMessage;
     controller.dispose();
   }
 });

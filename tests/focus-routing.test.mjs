@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import * as esbuild from 'esbuild';
@@ -36,6 +37,8 @@ async function createExtensionHarness(options = {}) {
   const codexProfilesDir = path.join(charlierDir, 'providers', 'codex', 'profiles');
   const convDir = path.join(geminiDir, 'antigravity-ide', 'conversations');
   const vsConvDir = path.join(geminiDir, 'antigravity', 'conversations');
+  const vsAnnDir = path.join(geminiDir, 'antigravity', 'annotations');
+  const vsDaemonDir = path.join(geminiDir, 'antigravity', 'daemon');
 
   fs.mkdirSync(home, { recursive: true });
   fs.mkdirSync(appData, { recursive: true });
@@ -45,6 +48,8 @@ async function createExtensionHarness(options = {}) {
   fs.mkdirSync(codexProfilesDir, { recursive: true });
   fs.mkdirSync(convDir, { recursive: true });
   fs.mkdirSync(vsConvDir, { recursive: true });
+  fs.mkdirSync(vsAnnDir, { recursive: true });
+  fs.mkdirSync(vsDaemonDir, { recursive: true });
   fs.mkdirSync(codexDir, { recursive: true });
 
   for (const name of process.platform === 'win32' ? ['codex.exe', 'agy.exe'] : ['codex', 'agy']) {
@@ -273,10 +278,16 @@ async function createExtensionHarness(options = {}) {
   );
 
   const subscriptions = [];
+  const wsStore = options.workspaceStateMap || new Map();
   const context = {
     extensionPath: root,
     subscriptions,
-    workspaceState: { get: () => undefined, update: async () => {} }
+    workspaceState: {
+      get: (k) => wsStore.get(k),
+      update: async (k, v) => {
+        wsStore.set(k, v);
+      }
+    }
   };
 
   await mod.exports.activate(context);
@@ -295,8 +306,12 @@ async function createExtensionHarness(options = {}) {
   return {
     root,
     home,
+    charlierDir,
     convDir,
     vsConvDir,
+    vsAnnDir,
+    vsDaemonDir,
+    wsStore,
     vscode,
     statusBarItem,
     terminals,
@@ -712,5 +727,170 @@ test('isCodexAppServerProcess matches shell:true spawns across OSes and CodexQuo
     assert.equal(signals, 2, 're-armed shell:true replacement process must emit activity');
   } finally {
     process._getActiveHandles = prevGetHandles;
+  }
+});
+
+test('multi-window isolation & single-window focus hardening: sibling Antigravity turns, idle annotations, background brain split panes, unfocused tabs, and shared state.json never hijack Codex', async () => {
+  const grpcWebJsonFrame = (payload) => {
+    const body = Buffer.from(JSON.stringify(payload), 'utf8');
+    const dataFrame = Buffer.alloc(5 + body.length);
+    dataFrame[0] = 0;
+    dataFrame.writeUInt32BE(body.length, 1);
+    body.copy(dataFrame, 5);
+    const trailer = Buffer.from('grpc-status: 0\r\n', 'utf8');
+    const trailerFrame = Buffer.alloc(5 + trailer.length);
+    trailerFrame[0] = 0x80;
+    trailerFrame.writeUInt32BE(trailer.length, 1);
+    trailer.copy(trailerFrame, 5);
+    return Buffer.concat([dataFrame, trailerFrame]);
+  };
+
+  // Mock Window A's own local `agy --hub` daemon owning only `conv-window-a` (IDLE)
+  const serverA = http.createServer((req, res) => {
+    if (req.url?.includes('GetAllCascadeTrajectories')) {
+      res.writeHead(200, { 'Content-Type': 'application/grpc-web+json' });
+      res.end(
+        grpcWebJsonFrame({
+          trajectorySummaries: {
+            'conv-window-a': {
+              status: 'CASCADE_RUN_STATUS_IDLE',
+              lastModifiedTime: new Date(Date.now() - 120_000).toISOString(),
+              workspaces: [{ workspaceFolderAbsoluteUri: 'file:///s:/Projects/WindowA' }]
+            }
+          }
+        })
+      );
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/grpc-web+json' });
+    res.end(grpcWebJsonFrame({}));
+  });
+  await new Promise((resolve) => serverA.listen(0, '127.0.0.1', resolve));
+  const portA = serverA.address().port;
+
+  const wsMapA = new Map([['charlier.selectedProvider', 'codex']]);
+  const prevGetHandles = process._getActiveHandles;
+  const fakeLocalHubHandle = {
+    pid: process.pid,
+    exitCode: null,
+    signalCode: null,
+    killed: false,
+    spawnfile: 'agy',
+    spawnargs: ['agy', '--hub', `--hub-port=${portA}`, '--app_data_dir=antigravity']
+  };
+  let activeHandles = [];
+  process._getActiveHandles = () => activeHandles;
+
+  const env = await createExtensionHarness({
+    appName: 'Visual Studio Code',
+    workspaceStateMap: wsMapA
+  });
+
+  try {
+    // 1. workspaceState beats global state.json (`antigravity`) so Window A boots cleanly on Codex
+    assert.equal(
+      env.lastSelectedProvider(),
+      'codex',
+      'Window A must restore its own workspaceState deck (codex) even when global state.json says antigravity'
+    );
+    env.setCodexExtensionActive(true);
+    await wait(2150);
+
+    // Seed sibling Window B's live daemon hub on disk while Window A has NO local agy hub
+    fs.writeFileSync(
+      path.join(env.vsDaemonDir, `hub_${portA}.json`),
+      JSON.stringify({ pid: process.pid, httpPort: portA, csrfToken: 'tok-a' })
+    );
+
+    // 2. Window A has no local agy hub, sibling Window B writes to conversations/ -> Window A stays Codex
+    fs.writeFileSync(path.join(env.vsConvDir, 'conv-window-b.db-wal'), Buffer.from('window-b-load'));
+    await wait(280);
+    assert.equal(
+      env.lastSelectedProvider(),
+      'codex',
+      'Window A with no local agy hub must ignore sibling Window B Antigravity disk activity'
+    );
+
+    // 3. Now Window A ALSO has its own local agy hub (owning `conv-window-a`), while Window B writes `conv-window-b`
+    activeHandles = [fakeLocalHubHandle];
+    fs.writeFileSync(path.join(env.vsConvDir, 'conv-window-b.db-wal'), Buffer.from('window-b-turn'));
+    await wait(280);
+    assert.equal(
+      env.lastSelectedProvider(),
+      'codex',
+      'Window A local hub does not own conv-window-b so Window B turns must never flip Window A'
+    );
+
+    // 4. Idle annotation metadata touch for Window A's own IDLE trajectory must NOT hijack Codex
+    fs.writeFileSync(path.join(env.vsAnnDir, 'conv-window-a.pbtxt'), Buffer.from('startup-index'));
+    await wait(280);
+    assert.equal(
+      env.lastSelectedProvider(),
+      'codex',
+      'Idle annotations/*.pbtxt metadata sync must not hijack Codex'
+    );
+
+    // 5. Background `.gemini/antigravity/brain/` split pane while editing regular `src/app.ts` must NOT hijack Codex
+    env.vscode.window.activeTextEditor = {
+      document: {
+        uri: {
+          toString: () => 'file:///s:/Projects/WindowA/src/app.ts',
+          scheme: 'file',
+          path: '/s:/Projects/WindowA/src/app.ts',
+          fsPath: 's:\\Projects\\WindowA\\src\\app.ts'
+        }
+      }
+    };
+    env.emitters.onDidChangeVisibleTextEditors.fire([
+      env.vscode.window.activeTextEditor,
+      {
+        document: {
+          uri: {
+            toString: () => 'file:///C:/Users/dev/.gemini/antigravity/brain/conv-window-a/task.md',
+            scheme: 'file',
+            path: '/C:/Users/dev/.gemini/antigravity/brain/conv-window-a/task.md',
+            fsPath: 'C:\\Users\\dev\\.gemini\\antigravity\\brain\\conv-window-a\\task.md'
+          }
+        }
+      }
+    ]);
+    await wait(140);
+    assert.equal(
+      env.lastSelectedProvider(),
+      'codex',
+      'Background Antigravity brain split pane must not hijack Codex while editing a normal file'
+    );
+
+    // 6. Unfocused window must ignore editor/tab/terminal focus events
+    env.vscode.window.state.focused = false;
+    env.vscode.window.tabGroups.all = [
+      {
+        isActive: true,
+        activeTab: { label: 'Antigravity', input: { viewType: 'antigravity.chat' } },
+        tabs: []
+      }
+    ];
+    env.emitters.onDidChangeTabs.fire({});
+    env.emitters.onDidChangeActiveTerminal.fire({ name: 'Charlier · Antigravity (Agy One)' });
+    await wait(140);
+    assert.equal(
+      env.lastSelectedProvider(),
+      'codex',
+      'Unfocused window must ignore tab and terminal focus signals'
+    );
+
+    // 7. Genuine focused Antigravity conversation write owned by Window A's local hub DOES flip Window A
+    env.vscode.window.state.focused = true;
+    fs.writeFileSync(path.join(env.vsConvDir, 'conv-window-a.db-wal'), Buffer.from('window-a-real-turn'));
+    await wait(320);
+    assert.equal(
+      env.lastSelectedProvider(),
+      'antigravity',
+      'Genuine focused conversation write owned by Window A local hub must auto-switch to Antigravity'
+    );
+  } finally {
+    process._getActiveHandles = prevGetHandles;
+    env.dispose();
+    await new Promise((resolve) => serverA.close(resolve));
   }
 });

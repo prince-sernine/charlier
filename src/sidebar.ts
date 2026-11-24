@@ -1058,7 +1058,6 @@ export class CharlierSidebarProvider implements vscode.WebviewViewProvider {
     const g7d = m?.gemini7d || m?.gemini || '--';
     const c5h = plan === 'FREE' ? '--' : m?.claude5h || '--';
     const c7d = plan === 'FREE' ? '--' : m?.claude7d || m?.claudeGpt || '--';
-    const argonVal = plan === 'FREE' ? '--' : plan === 'ULTRA' ? 'incl.' : m?.argon || '--';
     const hasStandaloneCarbon =
       plan !== 'FREE' &&
       Boolean(m?.carbon && m.carbon !== '--' && m.carbon !== 'incl.');
@@ -1076,7 +1075,6 @@ export class CharlierSidebarProvider implements vscode.WebviewViewProvider {
       c5Pct !== null && (c7Pct === null || c5Pct < c7Pct)
         ? formatReset(m?.claude5hReset || m?.claudeReset)
         : formatReset(m?.claude7dReset || m?.claudeReset);
-    const aRst = formatReset(m?.argonReset);
     const cbRst = formatReset(m?.carbonReset);
 
     const wheelsList = [
@@ -1086,13 +1084,6 @@ export class CharlierSidebarProvider implements vscode.WebviewViewProvider {
         plan === 'FREE' ? '--' : m?.claudeGpt || c7d,
         plan === 'FREE' ? 'Pro+ only' : cRst || '5h + 7d',
         undefined,
-        isMutedGauge
-      ),
-      renderRadialWheel(
-        plan === 'ULTRA' && !hasStandaloneCarbon ? 'Argon/Carbon' : 'Argon',
-        argonVal,
-        plan === 'FREE' ? 'Pro+ only' : plan === 'ULTRA' ? 'In Gemini' : aRst || 'Weekly',
-        m?.gemini || g7d,
         isMutedGauge
       )
     ];
@@ -1110,18 +1101,8 @@ export class CharlierSidebarProvider implements vscode.WebviewViewProvider {
         ? [
             renderPoolBarRow('Claude & GPT · 5h Fast Pool', c5h, formatReset(m?.claude5hReset), undefined, 'In Gemini', isMutedGauge),
             renderPoolBarRow('Claude & GPT · 7d Pool', c7d, formatReset(m?.claude7dReset || m?.claudeReset), undefined, 'In Gemini', isMutedGauge),
-            renderPoolBarRow(
-              plan === 'ULTRA' && !hasStandaloneCarbon
-                ? 'Gemini 4 Argon & Carbon · Ultra Pool'
-                : 'Gemini 4 Argon · 7d Pool',
-              argonVal,
-              aRst,
-              m?.gemini || g7d,
-              'In Gemini',
-              isMutedGauge
-            ),
             ...(hasStandaloneCarbon && m?.carbon
-              ? [renderPoolBarRow('Gemini 4 Carbon · 7d Pool', m.carbon, cbRst, undefined, 'In Gemini', isMutedGauge)]
+              ? [renderPoolBarRow('Gemini 4 Carbon · Extra Pool', m.carbon, cbRst, undefined, 'In Gemini', isMutedGauge)]
               : [])
           ]
         : [])
@@ -1415,7 +1396,6 @@ export class CharlierSidebarProvider implements vscode.WebviewViewProvider {
       const g7d = m?.gemini7d || m?.gemini || '--';
       const c5h = plan === 'FREE' ? '--' : m?.claude5h || '--';
       const c7d = plan === 'FREE' ? '--' : m?.claude7d || m?.claudeGpt || '--';
-      const argonVal = plan === 'FREE' ? '--' : plan === 'ULTRA' ? 'incl.' : m?.argon || '--';
       const hasStandaloneCarbon =
         plan !== 'FREE' &&
         Boolean(m?.carbon && m.carbon !== '--' && m.carbon !== 'incl.');
@@ -1427,18 +1407,8 @@ export class CharlierSidebarProvider implements vscode.WebviewViewProvider {
           ? [
               renderPoolBarRow('Claude & GPT · 5h Fast Pool', c5h, formatReset(m?.claude5hReset), undefined, 'In Gemini', isMutedGauge),
               renderPoolBarRow('Claude & GPT · 7d Pool', c7d, formatReset(m?.claude7dReset || m?.claudeReset), undefined, 'In Gemini', isMutedGauge),
-              renderPoolBarRow(
-                plan === 'ULTRA' && !hasStandaloneCarbon
-                  ? 'Gemini 4 Argon & Carbon · Ultra Pool'
-                  : 'Gemini 4 Argon · 7d Pool',
-                argonVal,
-                formatReset(m?.argonReset),
-                m?.gemini || g7d,
-                'In Gemini',
-                isMutedGauge
-              ),
               ...(hasStandaloneCarbon && m?.carbon
-                ? [renderPoolBarRow('Gemini 4 Carbon · 7d Pool', m.carbon, formatReset(m?.carbonReset), undefined, 'In Gemini', isMutedGauge)]
+                ? [renderPoolBarRow('Gemini 4 Carbon · Extra Pool', m.carbon, formatReset(m?.carbonReset), undefined, 'In Gemini', isMutedGauge)]
                 : [])
             ]
           : [])
@@ -1487,7 +1457,6 @@ export class CharlierSidebarProvider implements vscode.WebviewViewProvider {
         : isActive
           ? 'live'
           : formatTimeAgo(m?.updatedAt);
-    const argonVal = plan === 'FREE' ? '--' : plan === 'ULTRA' ? 'incl.' : m?.argon || '--';
     const hasStandaloneCarbon =
       plan !== 'FREE' &&
       Boolean(m?.carbon && m.carbon !== '--' && m.carbon !== 'incl.');
@@ -1528,7 +1497,6 @@ export class CharlierSidebarProvider implements vscode.WebviewViewProvider {
         <div class="card-metrics-strip">
           ${this.renderMiniMetricCell('Gemini', m?.gemini, undefined, isMutedGauge)}
           ${this.renderMiniMetricCell('Claude', plan === 'FREE' ? '--' : m?.claudeGpt, undefined, isMutedGauge)}
-          ${this.renderMiniMetricCell(plan === 'ULTRA' && !hasStandaloneCarbon ? 'Argon/Carbon' : 'Argon', argonVal, m?.gemini, isMutedGauge)}
           ${hasStandaloneCarbon ? this.renderMiniMetricCell('Carbon', m?.carbon, undefined, isMutedGauge) : ''}
         </div>
         <div class="card-actions">
@@ -1593,6 +1561,14 @@ export class CharlierSidebarProvider implements vscode.WebviewViewProvider {
           : isCliReady
             ? '<span class="active-tag">CLI READY</span>'
             : '';
+    const resetCreditTag =
+      !isApiKey && typeof m?.codexResetCredits === 'number' && m.codexResetCredits > 0
+        ? `<span class="credits-tag" title="${m.codexResetCredits} Codex rate-limit reset credit${m.codexResetCredits > 1 ? 's' : ''} available">⚡ ${m.codexResetCredits} Reset Credit${m.codexResetCredits > 1 ? 's' : ''}</span>`
+        : '';
+    const balanceTag =
+      !isApiKey && m?.codexCreditsBalance
+        ? `<span class="credits-tag balance-tag" title="Available Codex credit balance">${escapeHtml(m.codexCreditsBalance)}</span>`
+        : '';
 
     return `
       <div class="account-card tone-${profileTone(p.id)} ${needsReauth ? 'needs-reauth' : isNextUp ? 'is-next-up' : ''}" data-card-key="${id}" data-profile-card data-search="${escapeHtml(`${p.name} ${p.email}`)}">
@@ -1602,6 +1578,8 @@ export class CharlierSidebarProvider implements vscode.WebviewViewProvider {
             <span class="plan-badge ${plan === 'FREE' ? 'free' : ''}">${escapeHtml(plan)}</span>
             ${needsReauth ? '<span class="reauth-badge">RE-AUTH</span><span class="stale-badge">STALE</span>' : ''}
             ${roleTag}
+            ${resetCreditTag}
+            ${balanceTag}
           </div>
           <span class="snap-age">${escapeHtml(snap)}</span>
         </div>

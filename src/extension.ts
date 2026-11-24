@@ -190,7 +190,8 @@ export function activate(context: vscode.ExtensionContext): void {
     vaultInstance,
     quotaService,
     codexVaultInstance,
-    codexQuotaService
+    codexQuotaService,
+    context.workspaceState
   );
   codexQuotaService.setClaimedProfileIdsProvider(
     () => uiController?.getClaimedProfileIds('codex') ?? new Set()
@@ -302,19 +303,16 @@ export function activate(context: vscode.ExtensionContext): void {
         vaultInstance?.invalidateLiveSessionCache();
         codexVaultInstance?.invalidateLiveSessionCache();
         const nextFp = await captureAuthFingerprint().catch(() => null);
-        if (epoch !== fingerprintEpoch) {
+        if (epoch !== fingerprintEpoch || nextFp === null) {
           return;
         }
         if (
-          nextFp !== null &&
           lastFocusFingerprint !== null &&
           nextFp === lastFocusFingerprint
         ) {
           return;
         }
-        if (nextFp !== null) {
-          lastFocusFingerprint = nextFp;
-        }
+        lastFocusFingerprint = nextFp;
         const curCodexStat = statToken(getActiveCodexAuthPath());
         const codexChanged = curCodexStat !== lastWatcherCodexStat;
         lastWatcherCodexStat = curCodexStat;
@@ -342,8 +340,22 @@ export function activate(context: vscode.ExtensionContext): void {
     {
       shouldWatchIdeStorage: () => Boolean(uiController?.isAwaitingNewLogin()),
       antigravityActivitySubdirs,
-      onAntigravityActivity: () => {
+      onAntigravityActivity: (info) => {
         if (vscode.window.state?.focused === false) {
+          return;
+        }
+        const verifier = quotaService?.isAntigravityActivityOwnedByWindow;
+        if (typeof verifier === 'function') {
+          void quotaService!
+            .isAntigravityActivityOwnedByWindow(info)
+            .then((owned) => {
+              if (!owned || vscode.window.state?.focused === false) {
+                return;
+              }
+              uiController?.handleFocusSignal('antigravity', 'stream');
+              uiController?.handleProviderActivity('antigravity', 'stream');
+            })
+            .catch(() => {});
           return;
         }
         uiController?.handleFocusSignal('antigravity', 'stream');
@@ -418,19 +430,16 @@ export function activate(context: vscode.ExtensionContext): void {
         vaultInstance?.invalidateLiveSessionCache();
         codexVaultInstance?.invalidateLiveSessionCache();
         const nextFp = await captureAuthFingerprint().catch(() => null);
-        if (epoch !== fingerprintEpoch) {
+        if (epoch !== fingerprintEpoch || nextFp === null) {
           return;
         }
         if (
-          nextFp !== null &&
           lastFocusFingerprint !== null &&
           nextFp === lastFocusFingerprint
         ) {
           return;
         }
-        if (nextFp !== null) {
-          lastFocusFingerprint = nextFp;
-        }
+        lastFocusFingerprint = nextFp;
         const curCodexStat = statToken(getActiveCodexAuthPath());
         const codexChanged = curCodexStat !== lastWatcherCodexStat;
         lastWatcherCodexStat = curCodexStat;
@@ -522,6 +531,7 @@ export function activate(context: vscode.ExtensionContext): void {
   if (tabGroupsApi?.onDidChangeTabGroups) {
     focusAutoSwitchSubs.push(
       tabGroupsApi.onDidChangeTabGroups(() => {
+        if (vscode.window.state?.focused === false) return;
         const provider = detectProviderFromTab(
           tabGroupsApi.activeTabGroup?.activeTab
         );
@@ -540,6 +550,7 @@ export function activate(context: vscode.ExtensionContext): void {
           changed?: vscode.Tab[];
         }) => {
           codexQuotaService?.ensureStdoutObserver();
+          if (vscode.window.state?.focused === false) return;
           const activeTab = tabGroupsApi.activeTabGroup?.activeTab;
           if (!activeTab) return;
           const hasSpecificTabs =
@@ -573,6 +584,7 @@ export function activate(context: vscode.ExtensionContext): void {
     focusAutoSwitchSubs.push(
       vscode.window.onDidChangeActiveTextEditor((editor) => {
         uiController?.noteUserActivity();
+        if (vscode.window.state?.focused === false) return;
         const uri = editor?.document?.uri;
         if (!uri) return;
         const provider = detectProviderFromUri(uri);
@@ -586,17 +598,25 @@ export function activate(context: vscode.ExtensionContext): void {
     focusAutoSwitchSubs.push(
       vscode.window.onDidChangeVisibleTextEditors((editors) => {
         ensureCodexObserverArmed();
+        if (vscode.window.state?.focused === false) return;
         const activeUri = vscode.window.activeTextEditor?.document?.uri;
         const activeProvider = activeUri ? detectProviderFromUri(activeUri) : null;
         if (activeProvider) {
           uiController?.handleFocusSignal(activeProvider, 'editor');
           return;
         }
-        for (const ed of editors) {
-          const p = detectProviderFromUri(ed?.document?.uri);
-          if (p) {
-            uiController?.handleFocusSignal(p, 'editor');
-            break;
+        // Only fall back to non-active visible editors when no regular text editor is active
+        // (e.g. Output channel opened without an active code tab), and never let a background
+        // `.gemini/.../brain/` split pane hijack focus while editing regular workspace files.
+        if (!activeUri) {
+          for (const ed of editors) {
+            const edUri = ed?.document?.uri;
+            if (!edUri || isFileOrUntitledUri(edUri)) continue;
+            const p = detectProviderFromUri(edUri);
+            if (p) {
+              uiController?.handleFocusSignal(p, 'editor');
+              break;
+            }
           }
         }
       })
@@ -625,7 +645,9 @@ export function activate(context: vscode.ExtensionContext): void {
         const detected = detectProviderFromTerminalCommand(cmd);
         if (detected && event?.terminal) {
           terminalProviderMap.set(event.terminal, detected);
-          uiController?.handleFocusSignal(detected, 'terminal');
+          if (vscode.window.state?.focused !== false) {
+            uiController?.handleFocusSignal(detected, 'terminal');
+          }
         }
       })
     );
@@ -635,6 +657,7 @@ export function activate(context: vscode.ExtensionContext): void {
       vscode.window.onDidChangeActiveTerminal((terminal) => {
         if (!terminal) return;
         uiController?.noteUserActivity();
+        if (vscode.window.state?.focused === false) return;
         if (Date.now() - lastClosedTerminalAt < 400) return;
         const mapped = terminalProviderMap.get(terminal);
         if (mapped) {

@@ -7,7 +7,12 @@ import {
   getProfilesDir,
   getStateFilePath
 } from './constants';
-import { resolveSafeProfileSubdir, syncAntigravityCliHomeToVault } from './cli-isolation';
+import {
+  buildAntigravityCliTokenFromOAuth,
+  getProfileCliHomeDir,
+  resolveSafeProfileSubdir,
+  syncAntigravityCliHomeToVault
+} from './cli-isolation';
 import {
   ProfileMetadata,
   CharlierState,
@@ -288,10 +293,12 @@ export class Vault {
           const idx = deduped.indexOf(prev);
           if (idx >= 0) deduped[idx] = p;
           seenEmails.set(emailKey, p);
-          try {
-            fs.rmSync(path.join(profilesDir, prev.id), { recursive: true, force: true });
-          } catch {}
-        } else {
+          if (!fs.existsSync(getProfileCliHomeDir('antigravity', prev.id))) {
+            try {
+              fs.rmSync(path.join(profilesDir, prev.id), { recursive: true, force: true });
+            } catch {}
+          }
+        } else if (!fs.existsSync(getProfileCliHomeDir('antigravity', p.id))) {
           try {
             fs.rmSync(path.join(profilesDir, p.id), { recursive: true, force: true });
           } catch {}
@@ -299,7 +306,28 @@ export class Vault {
       }
     }
 
-    return deduped;
+    return deduped.map((p) => this.sanitizeLoadedProfile(p));
+  }
+
+  private sanitizeLoadedProfile(meta: ProfileMetadata): ProfileMetadata {
+    if (!meta || !meta.cachedQuota) return meta;
+    const cq = { ...meta.cachedQuota };
+    const effectivePlan = String(meta.planOverride || cq.plan || 'FREE').toUpperCase();
+    cq.argon = '--';
+    delete cq.argonReset;
+    if (cq.carbon === 'incl.' || effectivePlan === 'FREE') {
+      delete cq.carbon;
+      delete cq.carbonReset;
+    }
+    if (effectivePlan === 'FREE') {
+      cq.claudeGpt = '--';
+      delete cq.claude5h;
+      delete cq.claude5hReset;
+      delete cq.claude7d;
+      delete cq.claude7dReset;
+      delete cq.claudeReset;
+    }
+    return { ...meta, cachedQuota: cq };
   }
 
   public getProfile(id: string): ProfileMetadata | null {
@@ -310,7 +338,9 @@ export class Vault {
       return null;
     }
     try {
-      return JSON.parse(fs.readFileSync(metaPath, 'utf8')) as ProfileMetadata;
+      return this.sanitizeLoadedProfile(
+        JSON.parse(fs.readFileSync(metaPath, 'utf8')) as ProfileMetadata
+      );
     } catch {
       return null;
     }
@@ -340,7 +370,7 @@ export class Vault {
     }
     const lockPath = `${stateFile}.lock`;
     let lockFd: number | null = null;
-    for (let attempt = 0; attempt < 20; attempt++) {
+    for (let attempt = 0; attempt < 40; attempt++) {
       try {
         lockFd = fs.openSync(lockPath, 'wx', 0o600);
         break;
@@ -837,12 +867,69 @@ export class Vault {
     this.saveState({ activeProfileId: id, lastUpdated: Date.now() });
     this.invalidateLiveSessionCache();
 
-    // 3. Non-blocking OS Keyring swap
+    // 3. Non-blocking OS Keyring swap (synthesizing StoredToken JSON from oauth_creds.json
+    // when keyring_credential.json is absent or older so in-place `HasAuthToken` hydration works across all OSes,
+    // while strictly preserving any existing refresh_token and metadata from keyring_credential.json)
+    let keyringPayload: string | null = null;
+    let parsedKrObj: Record<string, any> | null = null;
+    let krExpiryMs = 0;
     if (fs.existsSync(sourceKeyring)) {
-      const secret = fs.readFileSync(sourceKeyring, 'utf8');
-      await this.keyring.writeAsync(secret);
+      try {
+        const rawKr = fs.readFileSync(sourceKeyring, 'utf8');
+        const parsedKr = JSON.parse(rawKr);
+        if (parsedKr && typeof parsedKr === 'object') {
+          keyringPayload = rawKr;
+          parsedKrObj = parsedKr;
+          if (typeof parsedKr?.token?.expiry === 'string') {
+            const parsedMs = Date.parse(parsedKr.token.expiry);
+            if (Number.isFinite(parsedMs)) krExpiryMs = parsedMs;
+          } else if (typeof parsedKr?.token?.expiry === 'number') {
+            krExpiryMs = parsedKr.token.expiry;
+          }
+        }
+      } catch {}
+    }
+    if (fs.existsSync(sourceOAuth)) {
+      try {
+        const parsedOAuth = JSON.parse(fs.readFileSync(sourceOAuth, 'utf8'));
+        const oauthExpiryMs =
+          typeof parsedOAuth?.expiry_date === 'number' && Number.isFinite(parsedOAuth.expiry_date)
+            ? parsedOAuth.expiry_date
+            : 0;
+        if (!keyringPayload || (oauthExpiryMs > 0 && oauthExpiryMs > krExpiryMs + 1000)) {
+          const synthesizedKr = buildAntigravityCliTokenFromOAuth(
+            parsedOAuth,
+            meta.email,
+            parsedKrObj
+          );
+          if (synthesizedKr) {
+            keyringPayload = synthesizedKr;
+            try {
+              this.atomicWriteFile(sourceKeyring, Buffer.from(synthesizedKr, 'utf8'));
+            } catch {}
+          }
+        }
+      } catch {}
+    }
+
+    const standaloneTokenPath = path.join(
+      path.dirname(oauthPath),
+      'jetski-standalone-oauth-token'
+    );
+    if (keyringPayload) {
+      await this.keyring.writeAsync(keyringPayload);
+      if (fs.existsSync(standaloneTokenPath)) {
+        try {
+          this.atomicWriteFile(standaloneTokenPath, Buffer.from(keyringPayload, 'utf8'));
+        } catch {}
+      }
     } else {
       await this.keyring.deleteAsync();
+      if (fs.existsSync(standaloneTokenPath)) {
+        try {
+          fs.unlinkSync(standaloneTokenPath);
+        } catch {}
+      }
     }
 
     return meta;
@@ -882,14 +969,17 @@ export class Vault {
         meta.planOverride = planOverride;
         if (meta.cachedQuota) {
           meta.cachedQuota.plan = planOverride;
+          meta.cachedQuota.argon = '--';
+          delete meta.cachedQuota.argonReset;
           if (planOverride === 'FREE') {
             meta.cachedQuota.claudeGpt = '--';
             meta.cachedQuota.claude5h = '--';
             meta.cachedQuota.claude7d = '--';
-            meta.cachedQuota.argon = '--';
             meta.cachedQuota.carbon = undefined;
-          } else if (planOverride === 'ULTRA') {
-            meta.cachedQuota.argon = 'incl.';
+            delete meta.cachedQuota.carbonReset;
+          } else if (meta.cachedQuota.carbon === 'incl.') {
+            meta.cachedQuota.carbon = undefined;
+            delete meta.cachedQuota.carbonReset;
           }
         }
       }
@@ -1059,6 +1149,17 @@ export class Vault {
         } catch {}
       }
       this.atomicWriteFile(targetKeyring, Buffer.from(keyringSecret, 'utf8'));
+    } else if (fs.existsSync(oauthPath)) {
+      try {
+        const parsedO = JSON.parse(fs.readFileSync(oauthPath, 'utf8'));
+        const synthesizedKr = buildAntigravityCliTokenFromOAuth(
+          parsedO,
+          existing.email && existing.email !== 'Unknown' ? existing.email : live.email
+        );
+        if (synthesizedKr) {
+          this.atomicWriteFile(targetKeyring, Buffer.from(synthesizedKr, 'utf8'));
+        }
+      } catch {}
     }
 
     const tokensRotated = Boolean(
@@ -1243,8 +1344,12 @@ export class Vault {
     // 3. Clear disk credentials cleanly (unlink both files so no empty 31-byte google_accounts.json stub remains)
     const accountsPath = getActiveGoogleAccountsPath();
     const oauthPath = getActiveOAuthCredsPath();
+    const standaloneTokenPath = path.join(
+      path.dirname(oauthPath),
+      'jetski-standalone-oauth-token'
+    );
 
-    for (const target of [oauthPath, accountsPath]) {
+    for (const target of [oauthPath, accountsPath, standaloneTokenPath]) {
       if (!fs.existsSync(target)) continue;
       for (let attempt = 0; attempt < 3; attempt++) {
         try {

@@ -340,9 +340,97 @@ test('cross-OS storage & manifest guards: Vault blocks traversal IDs, Credential
     path.resolve('dist')
   );
   try {
-    const vault = new vMod.exports.Vault({ read: () => null, readAsync: async () => null });
+    const vault = new vMod.exports.Vault({
+      read: () => null,
+      readAsync: async () => null,
+      writeAsync: async (s) => { lastKeyringWritten = s; return true; },
+      deleteAsync: async () => true
+    });
+    let lastKeyringWritten = null;
     assert.equal(vault.getProfile('../evil'), null);
     assert.throws(() => vault.deleteProfile('../evil'));
+
+    // Verify stale disk Argon/incl. sanitization + oauth_creds -> keyring_credential synthesis on switch
+    const profDir = path.join(root, '.gemini', 'charlier', 'profiles', 'pro-legacy');
+    fs.mkdirSync(profDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(profDir, 'metadata.json'),
+      JSON.stringify({
+        id: 'pro-legacy',
+        name: 'Legacy Pro',
+        email: 'sernine@charlier.dev',
+        createdAt: 1,
+        updatedAt: 2,
+        cachedQuota: { plan: 'PRO', gemini: '88%', claudeGpt: '76%', argon: '100%', carbon: 'incl.', updatedAt: 2 }
+      })
+    );
+    fs.writeFileSync(
+      path.join(profDir, 'oauth_creds.json'),
+      JSON.stringify({
+        access_token: 'ya29.test',
+        refresh_token: '1//test-rt',
+        expiry_date: Date.now() + 3600_000
+      })
+    );
+    const loaded = vault.getProfile('pro-legacy');
+    assert.equal(loaded.cachedQuota.argon, '--', 'Vault.getProfile must sanitize retired legacy argon % on disk');
+    assert.equal(loaded.cachedQuota.carbon, undefined, 'Vault.getProfile must strip legacy incl. carbon');
+
+    await vault.switchProfile('pro-legacy');
+    assert.ok(lastKeyringWritten, 'switchProfile must synthesize StoredToken keyring payload from oauth_creds.json when keyring_credential.json was absent');
+    const parsedKr = JSON.parse(lastKeyringWritten);
+    assert.equal(parsedKr.token.refresh_token, '1//test-rt');
+    assert.equal(parsedKr.id_token_email, 'sernine@charlier.dev');
+
+    // Regression guard: fresher oauth_creds.json WITHOUT refresh_token must preserve
+    // refresh_token and metadata already saved in keyring_credential.json
+    fs.writeFileSync(
+      path.join(profDir, 'keyring_credential.json'),
+      JSON.stringify({
+        token: {
+          access_token: 'ya29.older',
+          refresh_token: '1//preserved-rt',
+          token_type: 'Bearer',
+          expiry: new Date(Date.now() + 100_000).toISOString()
+        },
+        auth_method: 'consumer',
+        project_id: 'proj-keep',
+        id_token_email: 'sernine@charlier.dev'
+      })
+    );
+    fs.writeFileSync(
+      path.join(profDir, 'oauth_creds.json'),
+      JSON.stringify({
+        access_token: 'ya29.newer-no-rt',
+        expiry_date: Date.now() + 7200_000
+      })
+    );
+    lastKeyringWritten = null;
+    await vault.switchProfile('pro-legacy');
+    const mergedKr = JSON.parse(lastKeyringWritten);
+    assert.equal(mergedKr.token.access_token, 'ya29.newer-no-rt');
+    assert.equal(
+      mergedKr.token.refresh_token,
+      '1//preserved-rt',
+      'fresher oauth_creds.json without refresh_token must NOT wipe keyring refresh_token'
+    );
+    assert.equal(mergedKr.project_id, 'proj-keep', 'existing StoredToken metadata must be preserved');
+
+    // Regression guard: corrupt JSON in keyring_credential.json must NOT be written raw to OS keyring;
+    // Vault.switchProfile must fall back to synthesizing clean StoredToken JSON from oauth_creds.json
+    fs.writeFileSync(path.join(profDir, 'keyring_credential.json'), '{corrupt-not-json');
+    fs.writeFileSync(
+      path.join(profDir, 'oauth_creds.json'),
+      JSON.stringify({
+        access_token: 'ya29.recovered',
+        refresh_token: '1//recovered-rt'
+      })
+    );
+    lastKeyringWritten = null;
+    await vault.switchProfile('pro-legacy');
+    const recoveredKr = JSON.parse(lastKeyringWritten);
+    assert.equal(recoveredKr.token.access_token, 'ya29.recovered');
+    assert.equal(recoveredKr.token.refresh_token, '1//recovered-rt');
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

@@ -11,6 +11,7 @@ import {
   getCodexProfilesDir
 } from './constants';
 import {
+  getProfileCliHomeDir,
   readCodexCliHomeAuthReadOnly,
   syncCodexCliHomeToVault
 } from './cli-isolation';
@@ -529,7 +530,27 @@ export class CodexVault {
       } catch {}
     }
 
-    profiles.sort((a, b) => b.updatedAt - a.updatedAt);
+    const hasAuthCredentials = (profId: string): boolean => {
+      try {
+        const authFile = path.join(profilesDir, profId, 'auth.json');
+        if (!fs.existsSync(authFile)) return false;
+        const parsed = JSON.parse(fs.readFileSync(authFile, 'utf8'));
+        return Boolean(
+          parsed?.tokens?.refresh_token ||
+            parsed?.tokens?.access_token ||
+            (typeof parsed?.OPENAI_API_KEY === 'string' && parsed.OPENAI_API_KEY.trim())
+        );
+      } catch {
+        return false;
+      }
+    };
+
+    profiles.sort((a, b) => {
+      const aCred = hasAuthCredentials(a.id) ? 1 : 0;
+      const bCred = hasAuthCredentials(b.id) ? 1 : 0;
+      if (bCred !== aCred) return bCred - aCred;
+      return b.updatedAt - a.updatedAt;
+    });
 
     const seenKeys = new Set<string>();
     const deduped: ProfileMetadata[] = [];
@@ -544,7 +565,7 @@ export class CodexVault {
       if (!seenKeys.has(key)) {
         seenKeys.add(key);
         deduped.push(p);
-      } else {
+      } else if (!fs.existsSync(getProfileCliHomeDir('codex', p.id))) {
         try {
           fs.rmSync(path.join(profilesDir, p.id), { recursive: true, force: true });
         } catch {}
@@ -873,55 +894,80 @@ export class CodexVault {
       }
       const codexHome = getCodexHomeDir();
       const canonical = fs.existsSync(codexHome) ? fs.realpathSync(codexHome) : codexHome;
-      const hash16 = crypto.createHash('sha256').update(canonical, 'utf8').digest('hex').slice(0, 16);
-      const directAccount = `cli|${hash16}`;
-      const secretsAccount = `secrets|${hash16}`;
+      const candidatePaths = new Set<string>([canonical]);
+      if (process.platform === 'win32' && !canonical.startsWith('\\\\?\\')) {
+        // Rust `std::fs::canonicalize()` in `codex.exe` prefixes `\\?\` before hashing `sha256`
+        candidatePaths.add(`\\\\?\\${canonical}`);
+      }
+      const hashes = Array.from(candidatePaths).map((p) =>
+        crypto.createHash('sha256').update(p, 'utf8').digest('hex').slice(0, 16)
+      );
+      const directAccount = `cli|${hashes[0]}`;
+      const secretsAccount = `secrets|${hashes[0]}`;
 
       if (process.platform === 'win32') {
-        await new Promise<void>(resolve => {
-          execFile('cmdkey.exe', [`/delete:Codex Auth:${directAccount}`], { timeout: 2500, windowsHide: true }, () =>
-            resolve()
+        const tasks: Array<Promise<void>> = [];
+        for (const h16 of hashes) {
+          tasks.push(
+            new Promise<void>((resolve) => {
+              execFile(
+                'cmdkey.exe',
+                [`/delete:Codex Auth:cli|${h16}`],
+                { timeout: 2500, windowsHide: true },
+                () => resolve()
+              );
+            }),
+            new Promise<void>((resolve) => {
+              execFile(
+                'cmdkey.exe',
+                [`/delete:codex:secrets|${h16}`],
+                { timeout: 2500, windowsHide: true },
+                () => resolve()
+              );
+            })
           );
-        });
-        await new Promise<void>(resolve => {
-          execFile('cmdkey.exe', [`/delete:codex:${secretsAccount}`], { timeout: 2500, windowsHide: true }, () =>
-            resolve()
-          );
-        });
+        }
+        await Promise.all(tasks);
       } else if (process.platform === 'darwin') {
-        await new Promise<void>(resolve => {
-          execFile(
-            '/usr/bin/security',
-            ['delete-generic-password', '-s', 'Codex Auth', '-a', directAccount],
-            { timeout: 2500 },
-            () => resolve()
-          );
-        });
-        await new Promise<void>(resolve => {
-          execFile(
-            '/usr/bin/security',
-            ['delete-generic-password', '-s', 'codex', '-a', secretsAccount],
-            { timeout: 2500 },
-            () => resolve()
-          );
-        });
+        await Promise.all([
+          new Promise<void>(resolve => {
+            execFile(
+              '/usr/bin/security',
+              ['delete-generic-password', '-s', 'Codex Auth', '-a', directAccount],
+              { timeout: 2500 },
+              () => resolve()
+            );
+          }),
+          new Promise<void>(resolve => {
+            execFile(
+              '/usr/bin/security',
+              ['delete-generic-password', '-s', 'codex', '-a', secretsAccount],
+              { timeout: 2500 },
+              () => resolve()
+            );
+          })
+        ]);
       } else if (process.platform === 'linux') {
         if (!hasLinuxDbusSession()) return;
+        const tasks: Array<Promise<void>> = [];
         for (const [service, acct] of [
           ['Codex Auth', directAccount],
           ['codex', secretsAccount]
         ]) {
           for (const attr of ['username', 'account']) {
-            await new Promise<void>(resolve => {
-              execFile(
-                'secret-tool',
-                ['clear', 'service', service, attr, acct],
-                { timeout: 2500 },
-                () => resolve()
-              );
-            });
+            tasks.push(
+              new Promise<void>(resolve => {
+                execFile(
+                  'secret-tool',
+                  ['clear', 'service', service, attr, acct],
+                  { timeout: 2500 },
+                  () => resolve()
+                );
+              })
+            );
           }
         }
+        await Promise.all(tasks);
       }
     } catch {}
   }
@@ -1050,6 +1096,7 @@ export class CodexQuotaService {
   private lastSyncedAccountKey: string | null = null;
   private lastNativeLoginAt = 0;
   private isHotSwapping = false;
+  private pendingHotSwapMode: 'chatgpt' | 'apikey' | null | undefined = undefined;
   private observedStdoutProcs = new WeakSet<object>();
   private observedStdinProcs = new WeakSet<object>();
   private exitedProcs = new WeakSet<object>();
@@ -1366,17 +1413,37 @@ export class CodexQuotaService {
 
     const next5h = primaryRemPct !== null ? `${primaryRemPct}%` : prev?.codex5h || '--';
     const next7d = secondaryRemPct !== null ? `${secondaryRemPct}%` : prev?.codex7d || '--';
-    const creditsBalance =
-      rateLimits.credits?.hasCredits && rateLimits.credits?.balance
+    const explicitCreditsField = rateLimits.credits && typeof rateLimits.credits === 'object';
+    const creditsBalance = explicitCreditsField
+      ? rateLimits.credits.hasCredits && rateLimits.credits.balance
         ? `$${rateLimits.credits.balance}`
-        : prev?.codexCreditsBalance;
+        : undefined
+      : prev?.codexCreditsBalance;
+    const rawPushResetCredits =
+      rateLimits.rateLimitResetCredits?.availableCount ??
+      rateLimits.rate_limit_reset_credits?.available_count;
+    const nextResetCredits =
+      typeof rawPushResetCredits === 'number' && Number.isFinite(rawPushResetCredits)
+        ? Math.max(0, Math.round(rawPushResetCredits))
+        : prev?.codexResetCredits;
+
+    const prev5hPct = percentFromText(prev?.codex5h);
+    const possibleCreditSpent = Boolean(
+      typeof rawPushResetCredits !== 'number' &&
+        prev5hPct !== null &&
+        primaryRemPct !== null &&
+        prev5hPct < 50 &&
+        primaryRemPct >= prev5hPct + 40 &&
+        typeof prev?.codexResetCredits === 'number' &&
+        prev.codexResetCredits > 0
+    );
 
     const metric: CachedQuotaMetric = {
       ...(prev || {}),
       plan: planTier,
       gemini: next5h,
       claudeGpt: next7d,
-      argon: prev?.argon || '--',
+      argon: '--',
       codex5h: next5h,
       codex5hReset: primaryResetStr || undefined,
       codex5hResetAtMs: primaryResetAtMs,
@@ -1385,13 +1452,17 @@ export class CodexQuotaService {
       codex7dReset: secondaryResetStr || undefined,
       codex7dResetAtMs: secondaryResetAtMs,
       codex7dWindowMins: toWindowMins(secondary, prev?.codex7dWindowMins || 10080),
-      ...(creditsBalance ? { codexCreditsBalance: creditsBalance } : {}),
+      codexCreditsBalance: creditsBalance,
+      ...(typeof nextResetCredits === 'number' ? { codexResetCredits: nextResetCredits } : {}),
       updatedAt: now
     };
+    if (!metric.codexCreditsBalance) {
+      delete metric.codexCreditsBalance;
+    }
 
     const accountKey = decoded.accountId || decoded.email?.toLowerCase() || '';
     this.cachedMetric = metric;
-    this.lastFetchTime = now;
+    this.lastFetchTime = possibleCreditSpent ? 0 : now;
     this.activeAuthHealth = {
       accountKey,
       authStatus: 'ok',
@@ -1454,23 +1525,37 @@ export class CodexQuotaService {
   }
 
   private ensureGraftedHandles(): boolean {
-    if (this.graftedRootProc && this.graftedParser) {
-      return true;
-    }
     const getHandles = (process as any)._getActiveHandles;
     if (typeof getHandles !== 'function') {
-      return false;
+      return Boolean(this.graftedRootProc && this.graftedParser);
     }
     const handles: any[] = getHandles.call(process) || [];
-    const foundProc = handles.find(
+    // If `openai.chatgpt` respawned a fresh `codex app-server` handle mid-session, re-bind
+    // onto the live extension handle instead of grafting onto an orphaned previous rootProc.
+    const externalFreshProc = handles.find(
       (h) =>
         h &&
-        isCodexAppServerProcess(h, true) &&
+        h !== this.graftedRootProc &&
+        h !== this.graftedCurrentChild &&
+        this.isProcAlive(h) &&
+        isCodexAppServerProcess(h, false) &&
         h.stdout &&
         h.stdin
     );
+    if (!externalFreshProc && this.graftedRootProc && this.graftedParser) {
+      return true;
+    }
+    const foundProc =
+      externalFreshProc ||
+      handles.find(
+        (h) =>
+          h &&
+          isCodexAppServerProcess(h, true) &&
+          h.stdout &&
+          h.stdin
+      );
     if (!foundProc) {
-      return false;
+      return Boolean(this.graftedRootProc && this.graftedParser);
     }
     const pipes = foundProc.stdout?._readableState?.pipes;
     const parser = Array.isArray(pipes) ? pipes[0] : pipes;
@@ -1580,9 +1665,12 @@ export class CodexQuotaService {
     authMode: 'chatgpt' | 'apikey' | null = 'chatgpt'
   ): Promise<'swapped' | 'not-running' | 'failed'> {
     if (this.isHotSwapping) {
+      this.pendingHotSwapMode = authMode;
       return 'swapped';
     }
     this.isHotSwapping = true;
+    let failBufferedStdin: ((err: Error) => void) | null = null;
+    let pulsePromise: Promise<void> | null = null;
     try {
       // Update lastSyncedAccountKey from disk so CredentialWatcher does not double-fire
       const authPath = getActiveCodexAuthPath();
@@ -1606,6 +1694,69 @@ export class CodexQuotaService {
       const rootProc = this.graftedRootProc;
       const currentChild = this.graftedCurrentChild || rootProc;
       const parser = this.graftedParser;
+      const prevStdin = rootProc.stdin;
+
+      // Install a lightweight FIFO stdin buffer on rootProc immediately so we can pulse the
+      // React remount at t=0ms (instant visual transition alongside Cockpit) without dropping
+      // any JSON-RPC requests (`getAuthStatus`, `account/read`, `config/read`) sent while the
+      // replacement `codex app-server` spawns and finishes `initialize`.
+      const queuedWrites: Array<{
+        chunk: any;
+        encoding?: BufferEncoding;
+        cb?: (err?: Error | null) => void;
+      }> = [];
+      let stdinBuffered = true;
+      const bufferedStdin: any = {
+        writable: true,
+        destroyed: false,
+        writableEnded: false,
+        write(
+          chunk: any,
+          encodingOrCb?: BufferEncoding | ((err?: Error | null) => void),
+          cb?: (err?: Error | null) => void
+        ): boolean {
+          const encoding = typeof encodingOrCb === 'string' ? encodingOrCb : undefined;
+          const callback = typeof encodingOrCb === 'function' ? encodingOrCb : cb;
+          if (!stdinBuffered && rootProc.stdin && rootProc.stdin !== bufferedStdin) {
+            return encoding
+              ? rootProc.stdin.write(chunk, encoding, callback)
+              : rootProc.stdin.write(chunk, callback);
+          }
+          queuedWrites.push({ chunk, encoding, cb: callback });
+          return true;
+        },
+        end(cb?: () => void) {
+          cb?.();
+          return bufferedStdin;
+        },
+        on() {
+          return bufferedStdin;
+        },
+        once() {
+          return bufferedStdin;
+        },
+        removeListener() {
+          return bufferedStdin;
+        },
+        removeAllListeners() {
+          return bufferedStdin;
+        }
+      };
+
+      failBufferedStdin = (err: Error) => {
+        stdinBuffered = false;
+        if (rootProc.stdin === bufferedStdin) {
+          rootProc.stdin = prevStdin;
+        }
+        while (queuedWrites.length > 0) {
+          const item = queuedWrites.shift()!;
+          try {
+            item.cb?.(err);
+          } catch {}
+        }
+      };
+
+      rootProc.stdin = bufferedStdin;
 
       // Detach currentChild streams & listeners before killing its OS PID
       try {
@@ -1618,20 +1769,61 @@ export class CodexQuotaService {
         currentChild.stderr?.removeAllListeners?.();
       } catch {}
 
+      // Fire the 3-stage `account/updated` remount pulse IMMEDIATELY (concurrently with process
+      // respawn) so the Codex sidebar starts transitioning at ~15ms right alongside Cockpit
+      // instead of sitting frozen while `codex app-server` boots.
+      pulsePromise = (async () => {
+        const primeMode: 'chatgpt' | 'apikey' = authMode ?? 'chatgpt';
+        parser.write(
+          JSON.stringify({
+            method: 'account/updated',
+            params: { authMode: primeMode, planType: null }
+          }) + '\n'
+        );
+
+        await new Promise((r) => setTimeout(r, 15));
+
+        parser.write(
+          JSON.stringify({
+            method: 'account/updated',
+            params: { authMode: null, planType: null }
+          }) + '\n'
+        );
+
+        if (authMode === null) {
+          return;
+        }
+
+        await new Promise((r) => setTimeout(r, 35));
+
+        parser.write(
+          JSON.stringify({
+            method: 'account/login/completed',
+            params: { loginId: null, success: true, error: null }
+          }) + '\n'
+        );
+        parser.write(
+          JSON.stringify({
+            method: 'account/updated',
+            params: { authMode, planType: null }
+          }) + '\n'
+        );
+      })();
+
       const oldPid = currentChild.pid;
       if (typeof oldPid === 'number' && oldPid > 0) {
         try {
           process.kill(oldPid, 'SIGTERM');
         } catch {}
 
-        // Wait up to 180ms across Windows, macOS, and Linux for the old codex process to exit
-        // so SQLite locks on ~/.codex/state_*.sqlite and .coordination.lock release cleanly.
+        // Wait up to 180ms across Windows, macOS, and Linux (tight 5ms poll) for the old codex
+        // process to exit so SQLite locks on ~/.codex/state_*.sqlite and .coordination.lock release cleanly.
         const waitStart = Date.now();
         let alive = true;
         while (Date.now() - waitStart < 180) {
           try {
             process.kill(oldPid, 0);
-            await new Promise((r) => setTimeout(r, 15));
+            await new Promise((r) => setTimeout(r, 5));
           } catch {
             alive = false;
             break;
@@ -1640,7 +1832,7 @@ export class CodexQuotaService {
         if (alive) {
           try {
             process.kill(oldPid, 'SIGKILL');
-            await new Promise((r) => setTimeout(r, 20));
+            await new Promise((r) => setTimeout(r, 15));
           } catch {}
         }
       }
@@ -1669,9 +1861,12 @@ export class CodexQuotaService {
       const isWslSpawn = spawnFile.toLowerCase().includes('wsl');
       const pathSep = process.platform === 'win32' ? ';' : ':';
       const binDir = path.dirname(spawnFile);
+      const pathKey =
+        Object.keys(process.env).find((k) => k.toLowerCase() === 'path') || 'PATH';
+      const existingPath = process.env[pathKey] || process.env.PATH || '';
       const env: NodeJS.ProcessEnv = {
         ...process.env,
-        PATH: `${process.env.PATH || ''}${pathSep}${binDir}`,
+        [pathKey]: existingPath ? `${existingPath}${pathSep}${binDir}` : binDir,
         RUST_LOG: 'warn',
         CODEX_INTERNAL_ORIGINATOR_OVERRIDE: 'codex_vscode',
         ...(isWslSpawn ? {} : { CODEX_HOME: getCodexHomeDir() })
@@ -1684,13 +1879,17 @@ export class CodexQuotaService {
         shell: process.platform === 'win32' && /\.(cmd|bat)$/i.test(spawnFile)
       });
 
+      // Attach error listeners immediately before checking `pid` so async `ENOENT`/`EACCES`
+      // emissions on the next tick never throw an unhandled error event in the Extension Host.
+      newProc.on('error', () => {});
+      newProc.stdin?.on('error', () => {});
+      newProc.stderr?.on('data', () => {});
+
       if (!newProc.pid || !newProc.stdout || !newProc.stdin) {
+        failBufferedStdin(new Error('Failed to spawn replacement codex app-server'));
+        await pulsePromise.catch(() => {});
         return 'failed';
       }
-
-      newProc.on('error', () => {});
-      newProc.stdin.on('error', () => {});
-      newProc.stderr?.on('data', () => {});
 
       // Complete MCP initialize handshake with newProc and capture any trailing lines
       let trailingLines: string[];
@@ -1732,21 +1931,26 @@ export class CodexQuotaService {
               clientInfo: {
                 name: 'codex_vscode',
                 title: 'Codex Extension',
-                version: '26.1021.22027'
+                version: '26.1120.41243'
               },
               capabilities: {
                 experimentalApi: true,
                 mcpServerOpenaiFormElicitation: true,
-                requestAttestation: false
+                requestAttestation: false,
+                extensions: {
+                  'openai/elicitation': { form: {} }
+                }
               }
             }
           };
           newProc.stdin.write(JSON.stringify(initReq) + '\n');
         });
-      } catch (initErr) {
+      } catch (initErr: any) {
         try {
           newProc.kill('SIGKILL');
         } catch {}
+        failBufferedStdin(initErr instanceof Error ? initErr : new Error(String(initErr)));
+        await pulsePromise.catch(() => {});
         throw initErr;
       }
 
@@ -1754,12 +1958,16 @@ export class CodexQuotaService {
         newProc.stdin.write(JSON.stringify({ method: 'initialized', params: {} }) + '\n');
       } catch {}
 
-      // Graft newProc onto rootProc and parser
+      // Ensure the immediate visual remount pulse completed before flushing stdout/stdin
+      await pulsePromise.catch(() => {});
+
+      // Graft newProc onto rootProc and parser, then flush all buffered JSON-RPC requests in FIFO order
       for (const remLine of trailingLines) {
         parser.write(remLine.endsWith('\n') ? remLine : remLine + '\n');
       }
       newProc.stdout.pipe(parser, { end: false });
       this.attachStdoutObserver(newProc);
+      stdinBuffered = false;
       rootProc.stdin = newProc.stdin;
       rootProc.pid = newProc.pid;
       rootProc.kill = (signal?: NodeJS.Signals | number) => {
@@ -1771,55 +1979,37 @@ export class CodexQuotaService {
       };
       this.graftedCurrentChild = newProc;
 
-      // Step 1: Prime non-null authMode in useAuth()'s synchronous store so that even when
-      // the Codex webview is sitting on the fresh /login screen (where r.authMethod is null),
-      // Step 2's null pulse is guaranteed to satisfy `t.authMethod == null && r?.authMethod != null`.
-      const primeMode: 'chatgpt' | 'apikey' = authMode ?? 'chatgpt';
-      parser.write(
-        JSON.stringify({
-          method: 'account/updated',
-          params: { authMode: primeMode, planType: null }
-        }) + '\n'
-      );
-
-      await new Promise((r) => setTimeout(r, 30));
-
-      // Step 2: Pulse authMode: null to trigger onLogout() -> queryClient.clear() and
-      // updateAuthNonce(), which changes the root <Fragment key={l}> UUID and remounts
-      // the router cleanly while wiping cached account-info and rate-limits.
-      parser.write(
-        JSON.stringify({
-          method: 'account/updated',
-          params: { authMode: null, planType: null }
-        }) + '\n'
-      );
-
-      if (authMode === null) {
-        return 'swapped';
+      while (queuedWrites.length > 0) {
+        const item = queuedWrites.shift()!;
+        try {
+          if (item.encoding) {
+            newProc.stdin.write(item.chunk, item.encoding, item.cb);
+          } else {
+            newProc.stdin.write(item.chunk, item.cb);
+          }
+        } catch (writeErr: any) {
+          try {
+            item.cb?.(writeErr instanceof Error ? writeErr : new Error(String(writeErr)));
+          } catch {}
+        }
       }
 
-      await new Promise((r) => setTimeout(r, 50));
-
-      // Step 3: Restore target authMode on the freshly remounted React tree so useAuth(),
-      // use-chatgpt-account-info, and status-query fetch the new profile's identity and quota live.
-      parser.write(
-        JSON.stringify({
-          method: 'account/login/completed',
-          params: { loginId: null, success: true, error: null }
-        }) + '\n'
-      );
-      parser.write(
-        JSON.stringify({
-          method: 'account/updated',
-          params: { authMode, planType: null }
-        }) + '\n'
-      );
-
       return 'swapped';
-    } catch {
+    } catch (swapErr: any) {
+      failBufferedStdin?.(
+        swapErr instanceof Error ? swapErr : new Error(String(swapErr || 'Codex hot-swap failed'))
+      );
+      if (pulsePromise) {
+        await pulsePromise.catch(() => {});
+      }
       return 'failed';
     } finally {
       this.isHotSwapping = false;
+      if (this.pendingHotSwapMode !== undefined) {
+        const nextMode = this.pendingHotSwapMode;
+        this.pendingHotSwapMode = undefined;
+        void this.hotSwapCodexAppServer(nextMode).catch(() => {});
+      }
     }
   }
 
@@ -1918,9 +2108,12 @@ export class CodexQuotaService {
           timeout: 8000
         },
         res => {
-          let data = '';
-          res.on('data', chunk => (data += chunk));
+          const chunks: Buffer[] = [];
+          res.on('data', (chunk: Buffer) =>
+            chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+          );
           res.on('end', () => {
+            const data = Buffer.concat(chunks).toString('utf8');
             if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
               try {
                 resolve(JSON.parse(data));
@@ -2048,7 +2241,7 @@ export class CodexQuotaService {
         'OAI-App-Brand': 'codex',
         originator: 'codex_vscode',
         'x-openai-codex-pricing-chooser': '1',
-        'User-Agent': 'codex_vscode/26.1021.22027',
+        'User-Agent': 'codex_vscode/26.1120.41243',
         Accept: 'application/json'
       };
       if (accountId) {
@@ -2065,9 +2258,12 @@ export class CodexQuotaService {
           timeout: 8000
         },
         res => {
-          let body = '';
-          res.on('data', chunk => (body += chunk));
+          const chunks: Buffer[] = [];
+          res.on('data', (chunk: Buffer) =>
+            chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+          );
           res.on('end', () => {
+            const body = Buffer.concat(chunks).toString('utf8');
             if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
               try {
                 resolve(JSON.parse(body));
@@ -2943,6 +3139,12 @@ export class CodexQuotaService {
                 (u5h !== '--' || u7d !== '--')
               ? 'incl.'
               : '--';
+        const uCreditsPill =
+          uPlan !== 'API_KEY' &&
+          typeof liveDisplayMetric?.codexResetCredits === 'number' &&
+          liveDisplayMetric.codexResetCredits > 0
+            ? ` &nbsp;${renderHoverPill(`$(zap) ${liveDisplayMetric.codexResetCredits}`, 'warn', isLight)}`
+            : '';
         const uBadge = needsReauth
           ? `${renderHoverPill('RE-AUTH', 'danger', isLight)} &nbsp;${renderHoverPill('UNSAVED', 'warn', isLight)}`
           : renderHoverPill('UNSAVED', 'warn', isLight);
@@ -2950,7 +3152,7 @@ export class CodexQuotaService {
           ? `<span style="color:${pal.crimson};">*stale*</span>`
           : '*live*';
         md.appendMarkdown(
-          `| ${padCell(`<span style="color:${pal.warnFg};">$(sparkle)</span>`)} | ${padCell(`**${uName}** &nbsp;${uBadge} · [Save](command:charlier.saveProfile "${safeSaveTitle}")`)} | ${padCell(renderHoverPill(uPlan, 'plan', isLight))} | ${padCell(renderHoverPct(u5h, true, isLight, needsReauth))} | ${padCell(renderHoverPct(u7d, true, isLight, needsReauth))} | ${padCell(renderHoverPct(uRev, true, isLight, needsReauth))} | ${padCell(uSnap)} |\n`
+          `| ${padCell(`<span style="color:${pal.warnFg};">$(sparkle)</span>`)} | ${padCell(`**${uName}** &nbsp;${uBadge}${uCreditsPill} · [Save](command:charlier.saveProfile "${safeSaveTitle}")`)} | ${padCell(renderHoverPill(uPlan, 'plan', isLight))} | ${padCell(renderHoverPct(u5h, true, isLight, needsReauth))} | ${padCell(renderHoverPct(u7d, true, isLight, needsReauth))} | ${padCell(renderHoverPct(uRev, true, isLight, needsReauth))} | ${padCell(uSnap)} |\n`
         );
       }
 
@@ -3012,12 +3214,18 @@ export class CodexQuotaService {
           : '';
         const cliPill = isClaimed ? ` &nbsp;${renderHoverPill('CLI', 'warn', isLight)}` : '';
         const nextPill = isNextUp ? ` &nbsp;${renderHoverPill('NEXT', 'active', isLight)}` : '';
+        const creditsPill =
+          plan !== 'API_KEY' &&
+          typeof m?.codexResetCredits === 'number' &&
+          m.codexResetCredits > 0
+            ? ` &nbsp;${renderHoverPill(`$(zap) ${m.codexResetCredits}`, 'warn', isLight)}`
+            : '';
         const reauthPill = pNeedsReauth
           ? ` &nbsp;${renderHoverPill('RE-AUTH', 'danger', isLight)} &nbsp;${renderHoverPill('STALE', 'danger', isLight)}`
           : '';
         const accountCell = isCurrent
-          ? `**${safeName}** &nbsp;${pNeedsReauth ? `${renderHoverPill('RE-AUTH', 'danger', isLight)} &nbsp;${renderHoverPill('STALE', 'danger', isLight)}` : renderHoverPill('ACTIVE', 'active', isLight)}${cliPill}`
-          : `[${safeName}](command:charlier.switchProfileDirect?${switchArg} "${linkTitle}")${reauthPill}${cliPill}${nextPill}`;
+          ? `**${safeName}** &nbsp;${pNeedsReauth ? `${renderHoverPill('RE-AUTH', 'danger', isLight)} &nbsp;${renderHoverPill('STALE', 'danger', isLight)}` : renderHoverPill('ACTIVE', 'active', isLight)}${cliPill}${creditsPill}`
+          : `[${safeName}](command:charlier.switchProfileDirect?${switchArg} "${linkTitle}")${reauthPill}${cliPill}${nextPill}${creditsPill}`;
 
         md.appendMarkdown(
           `| ${padCell(marker)} | ${padCell(accountCell)} | ${padCell(renderHoverPill(plan, 'plan', isLight))} | ${padCell(renderHoverPct(c5h, isCurrent, isLight, pNeedsReauth))} | ${padCell(renderHoverPct(c7d, isCurrent, isLight, pNeedsReauth))} | ${padCell(renderHoverPct(cRev, isCurrent, isLight, pNeedsReauth))} | ${padCell(snap)} |\n`

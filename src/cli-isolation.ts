@@ -966,17 +966,26 @@ function readAntigravityKeyringTokenMeta(filePath: string): ParsedAntigravityTok
 
 export function buildAntigravityCliTokenFromOAuth(
   oauthCredsRaw: any,
-  email?: string | null
+  email?: string | null,
+  existingStoredToken?: Record<string, any> | null
 ): string | null {
   if (!oauthCredsRaw || typeof oauthCredsRaw !== 'object') return null;
+  const existingToken =
+    existingStoredToken && typeof existingStoredToken.token === 'object'
+      ? existingStoredToken.token
+      : null;
   const accessToken =
     typeof oauthCredsRaw.access_token === 'string' && oauthCredsRaw.access_token.trim()
       ? oauthCredsRaw.access_token.trim()
-      : '';
+      : typeof existingToken?.access_token === 'string' && existingToken.access_token.trim()
+        ? existingToken.access_token.trim()
+        : '';
   const refreshToken =
     typeof oauthCredsRaw.refresh_token === 'string' && oauthCredsRaw.refresh_token.trim()
       ? oauthCredsRaw.refresh_token.trim()
-      : '';
+      : typeof existingToken?.refresh_token === 'string' && existingToken.refresh_token.trim()
+        ? existingToken.refresh_token.trim()
+        : '';
   if (!accessToken && !refreshToken) return null;
 
   const expiryDateMs =
@@ -984,16 +993,24 @@ export function buildAntigravityCliTokenFromOAuth(
       ? oauthCredsRaw.expiry_date
       : Date.now() + 3600 * 1000;
 
+  const resolvedEmail =
+    email ||
+    (typeof existingStoredToken?.id_token_email === 'string'
+      ? existingStoredToken.id_token_email
+      : undefined);
+
   const payload = {
+    ...(existingStoredToken && typeof existingStoredToken === 'object' ? existingStoredToken : {}),
     token: {
+      ...(existingToken || {}),
       access_token: accessToken,
-      token_type: oauthCredsRaw.token_type || 'Bearer',
+      token_type: oauthCredsRaw.token_type || existingToken?.token_type || 'Bearer',
       refresh_token: refreshToken,
       expiry: new Date(expiryDateMs).toISOString(),
       expires_in: Math.max(0, Math.floor((expiryDateMs - Date.now()) / 1000))
     },
-    auth_method: 'consumer',
-    ...(email ? { id_token_email: email } : {}),
+    auth_method: existingStoredToken?.auth_method || 'consumer',
+    ...(resolvedEmail ? { id_token_email: resolvedEmail } : {}),
     writer_id: 'charlier'
   };
   return JSON.stringify(payload);
@@ -1120,15 +1137,36 @@ export function prepareAntigravityCliHome(
     const cliTokenPath = path.join(cliAgyDir, 'antigravity-oauth-token');
     if (!syncedToVault || !fs.existsSync(cliTokenPath)) {
       let tokenPayload: string | null = null;
+      let krMeta: ParsedAntigravityTokenMeta | null = null;
       if (fs.existsSync(vaultKeyringPath)) {
-        try {
-          tokenPayload = fs.readFileSync(vaultKeyringPath, 'utf8');
-        } catch {}
+        krMeta = readAntigravityKeyringTokenMeta(vaultKeyringPath);
+        if (krMeta) {
+          tokenPayload = krMeta.rawText;
+        }
       }
-      if (!tokenPayload && fs.existsSync(vaultOAuthPath)) {
+      if (fs.existsSync(vaultOAuthPath)) {
         try {
           const parsedOAuth = JSON.parse(fs.readFileSync(vaultOAuthPath, 'utf8'));
-          tokenPayload = buildAntigravityCliTokenFromOAuth(parsedOAuth, profileEmail);
+          const oauthExpiryMs =
+            typeof parsedOAuth?.expiry_date === 'number' && Number.isFinite(parsedOAuth.expiry_date)
+              ? parsedOAuth.expiry_date
+              : 0;
+          if (!tokenPayload || (krMeta && oauthExpiryMs > krMeta.expiryMs + 1000)) {
+            let parsedKr: Record<string, any> | null = null;
+            if (tokenPayload) {
+              try {
+                parsedKr = JSON.parse(tokenPayload);
+              } catch {}
+            }
+            const synthesized = buildAntigravityCliTokenFromOAuth(
+              parsedOAuth,
+              profileEmail,
+              parsedKr
+            );
+            if (synthesized) {
+              tokenPayload = synthesized;
+            }
+          }
         } catch {}
       }
       if (tokenPayload) {

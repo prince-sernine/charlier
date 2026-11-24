@@ -92,7 +92,9 @@ test('Antigravity hero includes Claude 5h pool inline, preserves .included color
     }
   };
   const ultraHtml = html(state('antigravity', [ultraAgy], 'ultra', 'saved'));
-  assert.match(ultraHtml, /<div class="wheel-item included"[\s\S]*?<div class="wheel-center">INCL<\/div>/);
+  assert.match(ultraHtml, /style="--gauge-count:2"/);
+  assert.doesNotMatch(ultraHtml, /Argon/);
+  assert.match(ultraHtml, /\.wheel-item\.included \.wheel-center/);
 
   const freeRow = { ...profile('free-acc', 'antigravity'), name: 'Charlier Labs', planOverride: 'FREE', updatedAt: 900 };
   const proRow = { ...profile('pro-acc', 'antigravity'), name: 'Rénine', planOverride: 'PRO', updatedAt: 100 };
@@ -394,7 +396,13 @@ test('cockpit guards FREE Carbon leakage, single-window FREE Codex strips, API_K
     cachedQuota: { plan: 'PRO', gemini: '90%', claudeGpt: '85%', argon: '80%', carbon: '75%', updatedAt: Date.now() }
   };
   const proOut = html(state('antigravity', [proWithCarbon], 'pro-agy', 'saved'));
-  assert.match(proOut, /class="wheels-grid wheels-4"/);
+  assert.match(proOut, /style="--gauge-count:3"/);
+  assert.doesNotMatch(proOut, /Argon/);
+
+  const standbyCodexWithCredits = {
+    ...profile('codex-standby-credits', 'codex'),
+    cachedQuota: { plan: 'PLUS', codex5h: '72%', codex7d: '88%', codexResetCredits: 2, codexCreditsBalance: '$12.50', updatedAt: Date.now() }
+  };
 
   const standbyFreeCodex = {
     ...profile('codex-free-single', 'codex'),
@@ -407,7 +415,9 @@ test('cockpit guards FREE Carbon leakage, single-window FREE Codex strips, API_K
     planOverride: undefined,
     cachedQuota: undefined
   };
-  const codexOut = html(state('codex', [profile('c-act', 'codex'), standbyFreeCodex, standbyApiKey], 'c-act', 'saved'));
+  const codexOut = html(state('codex', [profile('c-act', 'codex'), standbyCodexWithCredits, standbyFreeCodex, standbyApiKey], 'c-act', 'saved'));
+  assert.match(codexOut, /data-card-key="codex-standby-credits"[\s\S]*?class="credits-tag"[^>]*>⚡ 2 Reset Credits<\/span>/);
+  assert.match(codexOut, /data-card-key="codex-standby-credits"[\s\S]*?class="credits-tag balance-tag"[^>]*>\$12\.50<\/span>/);
   assert.match(codexOut, /data-card-key="refresh-all"[^>]*data-provider="codex"/);
   assert.match(codexOut, /data-card-key="add-account"[^>]*data-provider="codex"/);
   assert.match(codexOut, /class="mini-label">Primary</);
