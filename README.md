@@ -17,7 +17,7 @@
 </p>
 <p><sub>&middot;&nbsp;&nbsp;&nbsp;&middot;&nbsp;&nbsp;&nbsp;&middot;</sub></p>
 <p>
-  <img src="https://img.shields.io/badge/Charlier-v0.2.3-0B1119?style=flat-square&labelColor=131C26&color=86F65C" alt="Version 0.2.3" height="22" />
+  <img src="https://img.shields.io/badge/Charlier-v0.2.4-0B1119?style=flat-square&labelColor=131C26&color=86F65C" alt="Version 0.2.4" height="22" />
   <img src="https://img.shields.io/badge/Runtime%20Deps-0%20npm%20packages-0B1119?style=flat-square&labelColor=131C26&color=19B995" alt="Zero Dependencies" height="22" />
   <a href="https://marketplace.visualstudio.com/items?itemName=Sernine.charlier"><img src="https://img.shields.io/badge/VS%20Code-Marketplace-0B1119?style=flat-square&labelColor=131C26&color=8DBCF6&logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0iIzhEQkNGNiI%2bPHBhdGggZD0iTTIzLjE1IDIuNTg3TDE4LjIxLjIxYTEuNDk0IDEuNDk0IDAgMCAwLTEuNzA1LjI5bC05LjQ2IDguNjMtNC4xMi0zLjEyOGEuOTk5Ljk5OSAwIDAgMC0xLjI3Ni4wNTdMLjMyNyA3LjI2MUExIDEgMCAwIDAgLjMyNiA4Ljc0TDMuODk5IDEyIC4zMjYgMTUuMjZhMSAxIDAgMCAwIC4wMDEgMS40NzlMMS42NSAxNy45NGEuOTk5Ljk5OSAwIDAgMCAxLjI3Ni4wNTdsNC4xMi0zLjEyOCA5LjQ2IDguNjNhMS40OTIgMS40OTIgMCAwIDAgMS43MDQuMjlsNC45NDItMi4zNzdBMS41IDEuNSAwIDAgMCAyNCAxOS44OFY0LjEyYTEuNSAxLjUgMCAwIDAtLjg1LTEuNTMzem0tNS4xNDYgMTQuODYxTDEwLjgyNiAxMmw3LjE3OC01LjQ0OHYxMC44OTZ6Ii8%2bPC9zdmc%2b" alt="VS Code Marketplace" height="22" /></a>
   <a href="https://open-vsx.org/extension/Sernine/charlier"><img src="https://img.shields.io/badge/Open%20VSX-Registry-0B1119?style=flat-square&labelColor=131C26&color=92D6BE&logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0iIzkyRDZCRSI%2bPHBhdGggZD0iTTEyIDFMMiA2LjV2MTFMMTIgMjNsMTAtNS41di0xMUwxMiAxem0wIDIuMzFsNy41IDQuMTJMMTIgMTEuNTUgNC41IDcuNDMgMTIgMy4zMXpNNCA5LjQ0bDcgMy44NXY3LjRsLTctMy44NXYtNy40em05IDExLjI1di03LjRsNy0zLjg1djcuNGwtNyAzLjg1eiIvPjwvc3ZnPg==" alt="Open VSX" height="22" /></a>
@@ -37,7 +37,7 @@
 Google Antigravity and OpenAI Codex assume one login per machine. Every existing VS Code switcher accepts that wall and throws a sledgehammer at your editor to swap accounts. Charlier broke both limits:
 
 1. **Parallel Multi-Account CLI Concurrency**: Running two `codex` or `agy` accounts at once on one machine is supposed to be impossible because both lock onto a single global `~/.codex/auth.json`, `~/.gemini/`, and OS keyring. Charlier turns it into one click: keep **Account A pinned in your IDE** while running **Accounts B, C, and D side by side** in isolated integrated terminals via [`CLI Only` Mode](#multi-window--cli-concurrency-cli-only-mode). Each terminal boots in its own sandboxed home (`~/.gemini/charlier/cli-homes/`) with OS keyring bypass and automatic token sync-back. Zero collision.
-2. **Surgical Single-Provider Hot-Swap**: Other switchers call `workbench.action.restartExtensionHost` or `reloadWindow`, knocking out your whole editor setup at once: language servers, debuggers, MCP servers, and every co-running AI assistant drop together. Charlier leaves VS Code untouched. It fires an instant live handoff on `codex app-server` (buffered stdio graft) or hot-hydrates `agy` in place (`HasAuthToken` + `antigravity.reconnect`). Only the provider you clicked switches. Everything else keeps running.
+2. **Surgical Single-Provider Hot-Swap**: Other switchers call `workbench.action.restartExtensionHost` or `reloadWindow`, knocking out your whole editor setup at once: language servers, debuggers, MCP servers, and every co-running AI assistant drop together. Charlier leaves VS Code untouched. It fires an instant live handoff on `codex app-server` (buffered stdio graft with automatic chat and Goal replay) or hot-hydrates `agy` in place (`HasAuthToken` + `antigravity.reconnect`). Hit `0%` mid-task, cut to Account B, and keep going in the exact same chat or Goal. Everything else keeps running.
 3. **Sub-Second Speed & Live Burn Telemetry**: The Cockpit, Status Bar, and target provider sidebar flip together before your hand leaves the mouse, and your gauges stay live while you work: real-time turn-stream push on Codex, post-turn loopback sync on Antigravity, `60s` focused burn ticks across your active Hero and `CLI CLAIMED` terminals, and `5m` standby pulls without ever hitting Reload.
 
 Named after the **Charlier pass**: the classic one-handed card cut that brings the bottom half of the deck cleanly to the top. Built under **Sernine**.
@@ -50,7 +50,7 @@ Named after the **Charlier pass**: the classic one-handed card cut that brings t
 | :--- | :--- | :--- | :--- |
 | **Parallel CLI + IDE Accounts (`CLI Only`)** | **Yes** - run `codex --no-daemon` and `agy` on multiple accounts at once while IDE Hero stays pinned | **No** - global single-account lock; clobbers IDE login or collides in OS keyring | Manual env juggling |
 | **Single-Provider Surgical Hot-Swap** | **Yes** - switches ONLY the provider you clicked; sibling AI extensions, LSPs, and debuggers stay live | **No** - restarts the entire VS Code Extension Host and drops every running agent | Full browser OAuth roundtrip |
-| **Switch Handoff Latency** | **`~30ms` (Antigravity) / `~50ms` visual handoff (Codex)** | `3s-8s` full Extension Host or window reload | `30s-60s` browser login + callback |
+| **Switch Handoff Latency** | **`~30ms` (Antigravity) / `~50ms` visual handoff (Codex, active chats & Goals stay live)** | `3s-8s` full Extension Host or window reload | `30s-60s` browser login + callback |
 | **Antigravity 10-Minute Crash Wall** | **Bypassed** - zero-kill `HasAuthToken` hydration swaps back-to-back without tripping Google's 3-restart limit or killing sibling Antigravity windows | **Hits wall** - repeated process kills trip `recovery_budget_exhausted` and lock the sidebar | Manual full reload |
 | **Google Auth Curveballs (`VERIFY NEEDED`)** | **Handled** - catches phone/QR verification gates, locks `CLI Only`, wires 1-click verify, and auto-heals | **Blind** - breaks silently or shows bogus cached quota | Manual troubleshooting |
 | **Live Burn & Standby Telemetry** | **Yes** - real-time turn push + `60s` active & `CLI CLAIMED` ticks + `5m` direct HTTPS standby pulls | **No** - stale until manual reload, blind to inactive accounts | **No** |
@@ -66,7 +66,7 @@ Named after the **Charlier pass**: the classic one-handed card cut that brings t
 
 Neither provider was built to switch accounts inside a live editor. Restarting the Extension Host is the blunt shortcut; Charlier talks to each backend directly instead:
 
-- **OpenAI Codex (Instant Handoff + Buffered In-Memory Stdio Graft)**: `openai.chatgpt` spawns `codex app-server` once at startup and shuts down permanently if that child exits, while `codex-rs` refuses to load a different account from disk. Inside the shared Node.js `ExtensionHostProcess`, Charlier pins liveness on the existing `ChildProcess` handle (re-binding automatically if Codex ever restarts), swaps a FIFO buffer onto `rootProc.stdin`, and pulses a 3-stage `account/updated` reset at `~15-50ms` in parallel with Cockpit repaint so the Codex sidebar starts transitioning immediately. Concurrently, it reaps the old process cleanly, spawns a fresh `codex app-server` against the newly swapped `~/.codex/auth.json`, completes the MCP `initialize` handshake, grafts `stdin`/`stdout` onto the live JSONL parser, and flushes all queued JSON-RPC requests in order. Post-switch quota refresh waits until the graft finishes, keeping single-use refresh tokens out of any race.
+- **OpenAI Codex (Instant Handoff + Buffered Stdio Graft + Live Chat & Goal Replay)**: `openai.chatgpt` spawns `codex app-server` once at startup and shuts down permanently if that child exits, while `codex-rs` refuses to load a different account from disk. Inside the shared Node.js `ExtensionHostProcess`, Charlier pins liveness on the existing `ChildProcess` handle (re-binding automatically if Codex ever restarts), swaps a FIFO buffer onto `rootProc.stdin`, and pulses a 3-stage `account/updated` reset at `~15-50ms` in parallel with Cockpit repaint so the Codex sidebar flips immediately. Before reaping the old process (full Windows `.cmd`/`.bat` process-tree teardown and POSIX exit-tracked reaping), Charlier snapshots every loaded thread via `thread/loaded/list`, spawns a fresh `codex app-server` against the newly swapped `~/.codex/auth.json`, completes the MCP `initialize` handshake with the installed extension's version/capabilities, and silently replays `thread/resume` (`excludeTurns: true`) for every open chat and paused or `usage_limited` Goal before piping `stdout` and flushing queued JSON-RPC requests in order. Hit `0%` mid-task, cut to Account B, and keep going in the exact same chat or click Resume Goal with zero window reload. Post-switch quota refresh waits until the graft finishes, keeping single-use refresh tokens out of any race.
 - **Google Antigravity (`~30ms` Zero-Kill In-Place Hydration Across Dual Windows)**: After swapping the target profile's `StoredToken` payload into the OS keyring and disk stores (preserving existing refresh tokens when disk OAuth is newer), Charlier sends `LanguageServerService/HasAuthToken` (`~13ms`) to the already-running local `agy --hub` daemon in parallel with Cockpit repaint. Inside `agy`, `HasAuthToken` bypasses cache and runs `syncWithStoredToken` (`TokenChanged` + `ResetCaches`) directly in memory. Charlier triggers `antigravity.reconnect` immediately on `200 OK` so the sidebar flips right alongside Cockpit, then verifies the active email asynchronously via `GetUserStatus`. Because nothing gets killed, even when you have **multiple VS Code windows running the Antigravity extension** (or Antigravity IDE alongside VS Code), switching in one window leaves your other windows planted on their open chats with zero destructive restart: sibling windows pick up the new profile cleanly in real time, and if a swap lands mid-request, Google's built-in retry absorbs the handoff.
 
 ### Antigravity's 10-Minute Backend Restart Limit (And How Charlier Beats It)
@@ -120,15 +120,15 @@ Clicking **`CLI Only`** on any standby card (or the terminal button in QuickPick
 | Provider | Support | Roadmap & Capabilities |
 | :---: | :---: | :--- |
 | <img src="media/providers/antigravity.png" alt="Google Antigravity" width="38" height="38" /><br/>**Google Antigravity** | **Shipped** | Full IDE + isolated `agy` CLI vault (`Free` / `Pro` / `Ultra`), gRPC-Web daemon + Cloud Code HTTPS telemetry (`Gemini 4` [`Hydrogen`, `Neon`, `Carbon`] + `Claude & GPT` [`Opus`, `Sonnet`]), and `~30ms` zero-kill `HasAuthToken` hot-swap. |
-| <img src="media/providers/codex.png" alt="OpenAI Codex" width="38" height="38" /><br/>**OpenAI Codex** | **Shipped** | Full IDE + isolated `codex --no-daemon` vault (`Free` / `Plus` / `Pro` / `Team` / `Enterprise` / `Edu` / `API Key`), `~120ms` `wham/usage` HTTPS telemetry (`5h`, `7d`, `Code Review`, `Reset Credits`), RTR safety, and `~50ms` visual-handoff buffered stdio graft. |
+| <img src="media/providers/codex.png" alt="OpenAI Codex" width="38" height="38" /><br/>**OpenAI Codex** | **Shipped** | Full IDE + isolated `codex --no-daemon` vault (`Free` / `Plus` / `Pro` / `Team` / `Enterprise` / `Edu` / `API Key`), `~120ms` `wham/usage` HTTPS telemetry (`5h`, `7d`, `Code Review`, `Reset Credits`), RTR safety, and `~50ms` visual-handoff buffered stdio graft with live chat & Goal replay. |
 | <img src="media/providers/claude.png" alt="Anthropic Claude Code" width="38" height="38" /><br/>**Anthropic Claude Code** | **Planned** | Co-running `anthropic.claude-code` detection is live today. Next: multi-account Anthropic OAuth/session vault, session + weekly usage meters, single-extension hot-swap, and isolated `claude` CLI concurrency. |
 | <img src="media/providers/kimi.png" alt="Moonshot AI Kimi Code" width="38" height="38" /><br/>**Moonshot AI Kimi Code** | **Planned** | Co-running `moonshot-ai.kimi-code` / `kimi.kimi-code` detection is live today. Next: Kimi Code profile vault, live Moonshot quota telemetry in Cockpit, and isolated parallel `kimi` terminals. |
 | <img src="media/providers/cli.png" alt="Standalone charlier CLI" width="38" height="38" /><br/>**Standalone `charlier` CLI** | **Planned** | Zero-binary Node.js CLI (`npx charlier switch`, `charlier status`, `charlier quota`, `charlier exec`) sharing `~/.gemini/charlier/` for `tmux`, SSH, and Neovim workflows without an IDE open. |
 
 ### What's Cooking Next
 
-- **Zero-Kill In-Place Swaps for Codex**: Antigravity already hot-swaps across dual windows without killing a single backend process. Next up is chasing that same non-destructive swap on `codex app-server` (exploring in-memory external auth tokens and refresh interception instead of respawning the child process).
-- **Per-IDE-Window Profile Isolation**: Taking non-destructive multi-window swaps all the way to the endgame: binding completely different Antigravity and Codex profiles to separate VS Code or Antigravity IDE windows at the exact same time, so you can run as many parallel IDE instances on different accounts as you want without touching each other on disk or in the OS keyring.
+- **Per-IDE-Window Profile Isolation**: Taking non-destructive multi-window workflows all the way to the endgame: pinning completely different Codex and Antigravity profiles to separate VS Code or Antigravity IDE windows at the exact same time via isolated per-window homes and PID-stamped leases, so parallel IDE windows never touch each other on disk, race single-use refresh tokens, or collide in the OS keyring.
+- **Standalone `charlier` CLI & Expanding Vaults**: Zero-binary Node.js CLI (`npx charlier`) sharing `~/.gemini/charlier/` for `tmux`, SSH, and Neovim alongside full Anthropic Claude Code and Moonshot AI Kimi Code vaults.
 
 ---
 
@@ -193,7 +193,7 @@ All vault snapshots stay local under `~/.gemini/charlier/` via atomic `0o600` te
 | Setting | Default | Description |
 | :--- | :--- | :--- |
 | `charlier.antigravitySurgicalReload` | `true` | Hot-hydrate the local `agy` daemon in place (`~30ms`, with window-scoped respawn fallback) on Antigravity switch instead of restarting the Extension Host. |
-| `charlier.codexSurgicalReload` | `true` | Trigger an instant visual handoff (`~50ms`) and buffered stdio graft on `codex app-server` during Codex switch without restarting the Extension Host. |
+| `charlier.codexSurgicalReload` | `true` | Trigger an instant visual handoff (`~50ms`), buffered stdio graft, and in-memory thread/goal replay on `codex app-server` during Codex switch without restarting the Extension Host. |
 | `charlier.showStatusBarQuota` | `true` | Show remaining pool percentages inline inside the unified Status Bar pill. |
 | `charlier.autoRestartExtensionHost` | `true` | Soft-restart the Extension Host on switch when surgical hot-swap is disabled or no sibling provider is running. |
 | `charlier.autoSwitchProvider` | `"auto"` | Automatically flip Status Bar and Cockpit when focusing Antigravity/Codex editors, tabs, turn streams, or CLI terminals (`"auto"` or `"off"`). |
@@ -261,11 +261,11 @@ Optionally rebuild the Win32 Credential Manager N-API addon (requires Rust only 
 npm run build:wincred
 ```
 
-Install the generated `charlier-0.2.3.vsix` into VS Code or Antigravity IDE:
+Install the generated `charlier-0.2.4.vsix` into VS Code or Antigravity IDE:
 
 ```bash
-code --install-extension charlier-0.2.3.vsix --force
-antigravity-ide --install-extension charlier-0.2.3.vsix --force
+code --install-extension charlier-0.2.4.vsix --force
+antigravity-ide --install-extension charlier-0.2.4.vsix --force
 ```
 
 ---

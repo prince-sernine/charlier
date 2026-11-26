@@ -1106,6 +1106,8 @@ export class CodexQuotaService {
   private observedStdoutProcs = new WeakSet<object>();
   private observedStdinProcs = new WeakSet<object>();
   private exitedProcs = new WeakSet<object>();
+  private observedThreadIds = new Set<string>();
+  private capturedInitializeParams: Record<string, any> | null = null;
   private inFlightProfileRefresh = new Map<string, Promise<CachedQuotaMetric | null>>();
   private inFlightOAuthRefresh = new Map<string, Promise<DecodedCodexAuth | null>>();
   private activityListeners = new Set<(event: string) => void>();
@@ -1151,6 +1153,505 @@ export class CodexQuotaService {
     this.activityListeners.clear();
     this.rateLimitsUpdateListeners.clear();
     this.processExitListeners.clear();
+    this.observedThreadIds.clear();
+    this.capturedInitializeParams = null;
+    this.pendingHotSwapMode = undefined;
+  }
+
+  private splitBufferLines(buf: Buffer): { lines: string[]; rest: Buffer } {
+    const lines: string[] = [];
+    let start = 0;
+    let nl = buf.indexOf(0x0a, start);
+    while (nl !== -1) {
+      lines.push(buf.subarray(start, nl).toString('utf8'));
+      start = nl + 1;
+      nl = buf.indexOf(0x0a, start);
+    }
+    const rest =
+      start === 0
+        ? buf
+        : start < buf.length
+          ? Buffer.from(buf.subarray(start))
+          : Buffer.alloc(0);
+    return { lines, rest };
+  }
+
+  private chunkToBuffer(chunk: unknown): Buffer {
+    if (Buffer.isBuffer(chunk)) return chunk;
+    if (typeof chunk === 'string') return Buffer.from(chunk, 'utf8');
+    if (ArrayBuffer.isView(chunk)) {
+      return Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+    }
+    return Buffer.alloc(0);
+  }
+
+  private emitRateLimitsFromLine(line: string): void {
+    if (!line.includes('"account/rateLimits/updated"')) return;
+    try {
+      const parsed = JSON.parse(line);
+      if (parsed?.method === 'account/rateLimits/updated' && parsed?.params) {
+        const rl = parsed.params.rateLimits ?? parsed.params;
+        if (rl && typeof rl === 'object') {
+          for (const rlListener of this.rateLimitsUpdateListeners) {
+            try {
+              rlListener(rl);
+            } catch {}
+          }
+        }
+      }
+    } catch {}
+  }
+
+  private trackObservedThreadId(rawId: unknown): void {
+    if (typeof rawId !== 'string') return;
+    const threadId = rawId.trim();
+    if (!threadId) return;
+    // Maintain recency order and cap size so long IDE sessions stay bounded
+    if (this.observedThreadIds.has(threadId)) {
+      this.observedThreadIds.delete(threadId);
+    }
+    this.observedThreadIds.add(threadId);
+    while (this.observedThreadIds.size > 40) {
+      const oldest = this.observedThreadIds.values().next().value;
+      if (oldest === undefined) break;
+      this.observedThreadIds.delete(oldest);
+    }
+  }
+
+  private removeObservedThreadId(rawId: unknown): void {
+    if (typeof rawId !== 'string') return;
+    const threadId = rawId.trim();
+    if (threadId) {
+      this.observedThreadIds.delete(threadId);
+    }
+  }
+
+  private buildInitializeParams(): Record<string, any> {
+    if (this.capturedInitializeParams) {
+      try {
+        return JSON.parse(JSON.stringify(this.capturedInitializeParams));
+      } catch {}
+    }
+    let extVersion = '26.1120.50957';
+    try {
+      const ext = vscode.extensions?.getExtension?.('openai.chatgpt');
+      const v = ext?.packageJSON?.version;
+      if (typeof v === 'string' && v.trim()) {
+        extVersion = v.trim();
+      }
+    } catch {}
+    return {
+      clientInfo: {
+        name: 'codex_vscode',
+        title: 'Codex Extension',
+        version: extVersion
+      },
+      capabilities: {
+        experimentalApi: true,
+        mcpServerOpenaiFormElicitation: true,
+        requestAttestation: false,
+        extensions: {
+          'openai/elicitation': { form: {} }
+        }
+      }
+    };
+  }
+
+  private extractThreadIdsFromQueuedWrites(
+    queuedWrites: Array<{ chunk: any }>
+  ): string[] {
+    const ids: string[] = [];
+    const seen = new Set<string>();
+    const add = (raw: unknown) => {
+      if (typeof raw !== 'string') return;
+      const tid = raw.trim();
+      if (!tid || seen.has(tid)) return;
+      seen.add(tid);
+      ids.push(tid);
+    };
+    const inspectLine = (line: string) => {
+      if (
+        !line.includes('"threadId"') ||
+        (!line.includes('"turn/start"') &&
+          !line.includes('"turn/steer"') &&
+          !line.includes('"turn/interrupt"') &&
+          !line.includes('"turn/addUserMessage"') &&
+          !line.includes('"thread/goal/set"') &&
+          !line.includes('"thread/read"') &&
+          !line.includes('"thread/readState/update"') &&
+          !line.includes('"thread/approveGuardianDeniedAction"') &&
+          !line.includes('"review/start"'))
+      ) {
+        return;
+      }
+      try {
+        const parsed = JSON.parse(line);
+        add(parsed?.params?.threadId);
+      } catch {}
+    };
+    let rawBuf: Buffer = Buffer.alloc(0);
+    for (const item of queuedWrites) {
+      const chunkBuf = this.chunkToBuffer(item.chunk);
+      if (chunkBuf.length === 0) continue;
+      rawBuf = rawBuf.length > 0 ? Buffer.concat([rawBuf, chunkBuf]) : chunkBuf;
+      const { lines, rest } = this.splitBufferLines(rawBuf);
+      rawBuf = rest;
+      for (const line of lines) {
+        inspectLine(line);
+      }
+    }
+    if (rawBuf.length > 0) {
+      const tail = rawBuf.toString('utf8').trim();
+      if (tail) inspectLine(tail);
+    }
+    return ids;
+  }
+
+  /**
+   * Queries `thread/loaded/list` directly on the outgoing `codex app-server` child process
+   * (after `stdout` has been unpiped from `openai.chatgpt`'s parser) to obtain the exact set
+   * of in-memory loaded threads (regular chats + Goals) before terminating the old PID.
+   * Returns `null` if the child is unreachable or times out so callers can fall back cleanly.
+   */
+  private async queryLoadedThreadsFromChild(
+    child: any,
+    childStdin: any
+  ): Promise<string[] | null> {
+    if (
+      !child ||
+      !child.stdout ||
+      !childStdin ||
+      typeof childStdin.write !== 'function' ||
+      childStdin.destroyed ||
+      childStdin.writableEnded ||
+      child.stdout.destroyed
+    ) {
+      return null;
+    }
+
+    const MAX_PAGES = 5;
+    const MAX_THREADS = 40;
+    const PAGE_TIMEOUT_MS = 250;
+    const MAX_LINE_BYTES = 16 * 1024 * 1024;
+    const loadedIds: string[] = [];
+    const seen = new Set<string>();
+    let cursor: string | null | undefined = null;
+
+    let rawBuf: Buffer = Buffer.alloc(0);
+    let pendingId: string | null = null;
+    let pendingResolve: ((msg: any | null) => void) | null = null;
+
+    const onData = (chunk: Buffer | string) => {
+      const chunkBuf = this.chunkToBuffer(chunk);
+      if (chunkBuf.length === 0) return;
+      rawBuf = rawBuf.length > 0 ? Buffer.concat([rawBuf, chunkBuf]) : chunkBuf;
+      if (rawBuf.length > MAX_LINE_BYTES) {
+        rawBuf = Buffer.alloc(0);
+        return;
+      }
+      const { lines, rest } = this.splitBufferLines(rawBuf);
+      rawBuf = rest;
+      for (const line of lines) {
+        if (!pendingId || !line.includes(pendingId)) continue;
+        try {
+          const parsed = JSON.parse(line);
+          if (parsed && String(parsed.id) === pendingId) {
+            const resolve = pendingResolve;
+            pendingId = null;
+            pendingResolve = null;
+            resolve?.(parsed);
+          }
+        } catch {}
+      }
+    };
+
+    const onChildExit = () => {
+      const resolve = pendingResolve;
+      pendingId = null;
+      pendingResolve = null;
+      resolve?.(null);
+    };
+
+    try {
+      child.once?.('exit', onChildExit);
+      child.stdout.on('data', onData);
+      child.stdout.resume?.();
+      for (let page = 0; page < MAX_PAGES && loadedIds.length < MAX_THREADS; page++) {
+        const reqId = `charlier-loaded-list-${page}`;
+        const msg = await new Promise<any | null>((resolve) => {
+          pendingId = reqId;
+          const timer = setTimeout(() => {
+            if (pendingId === reqId) {
+              pendingId = null;
+              pendingResolve = null;
+              resolve(null);
+            }
+          }, PAGE_TIMEOUT_MS);
+          pendingResolve = (val: any | null) => {
+            clearTimeout(timer);
+            resolve(val);
+          };
+          try {
+            const params: Record<string, any> = cursor ? { cursor } : {};
+            childStdin.write(
+              JSON.stringify({ id: reqId, method: 'thread/loaded/list', params }) + '\n'
+            );
+          } catch {
+            clearTimeout(timer);
+            pendingId = null;
+            pendingResolve = null;
+            resolve(null);
+          }
+        });
+
+        if (!msg || msg.error || !Array.isArray(msg.result?.data)) {
+          return page === 0 ? null : loadedIds;
+        }
+        for (const rawId of msg.result.data) {
+          if (typeof rawId !== 'string') continue;
+          const tid = rawId.trim();
+          if (!tid || seen.has(tid)) continue;
+          seen.add(tid);
+          loadedIds.push(tid);
+          if (loadedIds.length >= MAX_THREADS) break;
+        }
+        const nextCursor = msg.result?.nextCursor;
+        if (typeof nextCursor === 'string' && nextCursor.trim()) {
+          cursor = nextCursor;
+        } else {
+          break;
+        }
+      }
+      return loadedIds;
+    } catch {
+      return loadedIds.length > 0 ? loadedIds : null;
+    } finally {
+      try {
+        child.stdout?.pause?.();
+        child.stdout?.removeListener?.('data', onData);
+        child.removeListener?.('exit', onChildExit);
+      } catch {}
+    }
+  }
+
+  /**
+   * Re-hydrates previously loaded threads into the replacement `codex app-server`'s in-memory
+   * `ThreadManager` via `thread/resume({ threadId, excludeTurns: true })` BEFORE piping `stdout`
+   * to `openai.chatgpt` and BEFORE flushing `queuedWrites`.
+   * Restores both regular chats (`turn/start`) and paused/`usage_limited` Goals (`thread/goal/set`)
+   * without triggering automatic turns, while filtering synthetic responses and pre-pipe thread
+   * replay noise so `openai.chatgpt` receives only clean server notifications.
+   */
+  private async replayThreadResumesOnChild(
+    child: any,
+    threadIds: string[],
+    initialBuf: Buffer = Buffer.alloc(0)
+  ): Promise<{
+    resumedIds: string[];
+    permanentlyFailedIds: string[];
+    trailingLines: string[];
+    leftoverBuf: Buffer;
+  }> {
+    const uniqueIds: string[] = [];
+    const seen = new Set<string>();
+    for (const rawId of threadIds) {
+      const tid = typeof rawId === 'string' ? rawId.trim() : '';
+      if (!tid || seen.has(tid)) continue;
+      seen.add(tid);
+      uniqueIds.push(tid);
+      if (uniqueIds.length >= 40) break;
+    }
+    if (uniqueIds.length === 0 || !child?.stdin || !child?.stdout) {
+      return {
+        resumedIds: [],
+        permanentlyFailedIds: [],
+        trailingLines: [],
+        leftoverBuf: initialBuf
+      };
+    }
+
+    const MAX_LINE_BYTES = 16 * 1024 * 1024;
+    const resumedIdSet = new Set<string>(uniqueIds);
+    const pendingRequests = new Map<string, (msg: any | null) => void>();
+    const trailingLines: string[] = [];
+    let rawBuf: Buffer = initialBuf;
+    const deadlineAt = Date.now() + 4500;
+
+    const isRetryableResumeError = (err: any): boolean => {
+      const msg = String(err?.message || err || '').toLowerCase();
+      return (
+        msg.includes('thread writer lock') ||
+        msg.includes('already has an active writer') ||
+        msg.includes('is closing; retry thread/resume') ||
+        msg.includes('database is locked') ||
+        msg.includes('sqlite_busy')
+      );
+    };
+
+    const isPermanentMissingThreadError = (err: any): boolean => {
+      const msg = String(err?.message || err || '').toLowerCase();
+      return (
+        msg.includes('no rollout found') ||
+        msg.includes('failed to resolve rollout path') ||
+        msg.includes('is archived') ||
+        msg.includes('deleted')
+      );
+    };
+
+    const processLine = (rawLine: string) => {
+      const trimmed = rawLine.trim();
+      if (!trimmed) return;
+      let parsed: any = null;
+      try {
+        parsed = JSON.parse(trimmed);
+      } catch {
+        trailingLines.push(trimmed);
+        return;
+      }
+      const idStr = parsed?.id !== undefined && parsed?.id !== null ? String(parsed.id) : '';
+      if (idStr && pendingRequests.has(idStr)) {
+        const resolve = pendingRequests.get(idStr)!;
+        pendingRequests.delete(idStr);
+        resolve(parsed);
+        return;
+      }
+      if (idStr.startsWith('charlier-resume-')) {
+        return;
+      }
+      const method = typeof parsed?.method === 'string' ? parsed.method : '';
+      const notifThreadId =
+        typeof parsed?.params?.threadId === 'string'
+          ? parsed.params.threadId
+          : typeof parsed?.params?.thread?.id === 'string'
+            ? parsed.params.thread.id
+            : '';
+      if (
+        notifThreadId &&
+        resumedIdSet.has(notifThreadId) &&
+        (method === 'thread/status/changed' ||
+          method === 'thread/goal/updated' ||
+          method === 'thread/started' ||
+          method === 'thread/resumed')
+      ) {
+        return;
+      }
+      trailingLines.push(trimmed);
+    };
+
+    const onData = (chunk: Buffer | string) => {
+      const chunkBuf = this.chunkToBuffer(chunk);
+      if (chunkBuf.length === 0) return;
+      rawBuf = rawBuf.length > 0 ? Buffer.concat([rawBuf, chunkBuf]) : chunkBuf;
+      if (rawBuf.length > MAX_LINE_BYTES) {
+        rawBuf = Buffer.alloc(0);
+        return;
+      }
+      const { lines, rest } = this.splitBufferLines(rawBuf);
+      rawBuf = rest;
+      for (const rawLine of lines) {
+        processLine(rawLine);
+      }
+    };
+
+    let childExited = false;
+    const onChildExit = () => {
+      childExited = true;
+      for (const resolve of pendingRequests.values()) {
+        try {
+          resolve(null);
+        } catch {}
+      }
+      pendingRequests.clear();
+    };
+
+    const sendResumeOnce = (threadId: string, reqId: string, timeoutMs: number): Promise<any | null> =>
+      new Promise<any | null>((resolve) => {
+        if (childExited || timeoutMs <= 0 || child.stdin.destroyed || child.stdin.writableEnded) {
+          resolve(null);
+          return;
+        }
+        const timer = setTimeout(() => {
+          pendingRequests.delete(reqId);
+          resolve(null);
+        }, timeoutMs);
+        pendingRequests.set(reqId, (msg) => {
+          clearTimeout(timer);
+          resolve(msg);
+        });
+        try {
+          child.stdin.write(
+            JSON.stringify({
+              id: reqId,
+              method: 'thread/resume',
+              params: {
+                threadId,
+                excludeTurns: true
+              }
+            }) + '\n'
+          );
+        } catch {
+          clearTimeout(timer);
+          pendingRequests.delete(reqId);
+          resolve(null);
+        }
+      });
+
+    const resumedIds: string[] = [];
+    const permanentlyFailedIds: string[] = [];
+    try {
+      child.once?.('exit', onChildExit);
+      if (rawBuf.length > 0) {
+        const { lines, rest } = this.splitBufferLines(rawBuf);
+        rawBuf = rest;
+        for (const rawLine of lines) {
+          processLine(rawLine);
+        }
+      }
+      child.stdout.on('data', onData);
+      child.stdout.resume?.();
+      const BATCH_SIZE = 4;
+      const RETRY_DELAYS_MS = [120, 260];
+      let seq = 0;
+      for (let i = 0; i < uniqueIds.length; i += BATCH_SIZE) {
+        const remainingBudget = deadlineAt - Date.now();
+        if (childExited || remainingBudget <= 50) break;
+        const batch = uniqueIds.slice(i, i + BATCH_SIZE);
+        await Promise.allSettled(
+          batch.map(async (threadId) => {
+            const perReqTimeout = Math.min(2500, Math.max(150, deadlineAt - Date.now()));
+            let resp = await sendResumeOnce(threadId, `charlier-resume-${seq++}`, perReqTimeout);
+            for (const retryDelay of RETRY_DELAYS_MS) {
+              if (!resp?.error || !isRetryableResumeError(resp.error)) break;
+              if (childExited || deadlineAt - Date.now() <= retryDelay + 150) break;
+              await new Promise((r) => setTimeout(r, retryDelay));
+              const retryTimeout = Math.min(1800, Math.max(150, deadlineAt - Date.now()));
+              resp = await sendResumeOnce(threadId, `charlier-resume-${seq++}`, retryTimeout);
+            }
+            if (resp && !resp.error) {
+              resumedIds.push(threadId);
+            } else if (resp?.error && isPermanentMissingThreadError(resp.error)) {
+              permanentlyFailedIds.push(threadId);
+            }
+          })
+        );
+      }
+    } catch {
+      // Non-fatal: partial or failed replay must never fail the swap
+    } finally {
+      try {
+        child.stdout?.pause?.();
+        child.stdout?.removeListener?.('data', onData);
+        child.removeListener?.('exit', onChildExit);
+      } catch {}
+      for (const resolve of pendingRequests.values()) {
+        try {
+          resolve(null);
+        } catch {}
+      }
+      pendingRequests.clear();
+    }
+
+    return { resumedIds, permanentlyFailedIds, trailingLines, leftoverBuf: rawBuf };
   }
 
   public getLastFetchTime(): number {
@@ -1285,6 +1786,32 @@ export class CodexQuotaService {
               !line.includes('"id":"charlier-') &&
               (line.includes('"method":"turn/started"') ||
                 line.includes('"method":"thread/started"') ||
+                line.includes('"method":"thread/resumed"') ||
+                line.includes('"method":"thread/goal/updated"') ||
+                line.includes('"method":"thread/status/changed"') ||
+                line.includes('"method":"thread/closed"') ||
+                line.includes('"method":"thread/archived"') ||
+                line.includes('"method":"thread/deleted"'))
+            ) {
+              try {
+                const parsed = JSON.parse(line);
+                const method = parsed?.method;
+                const tid = parsed?.params?.threadId ?? parsed?.params?.thread?.id;
+                if (
+                  method === 'thread/closed' ||
+                  method === 'thread/archived' ||
+                  method === 'thread/deleted'
+                ) {
+                  this.removeObservedThreadId(tid);
+                } else if (tid) {
+                  this.trackObservedThreadId(tid);
+                }
+              } catch {}
+            }
+            if (
+              !line.includes('"id":"charlier-') &&
+              (line.includes('"method":"turn/started"') ||
+                line.includes('"method":"thread/started"') ||
                 line.includes('"method":"thread/resumed"'))
             ) {
               for (const listener of this.activityListeners) {
@@ -1318,6 +1845,45 @@ export class CodexQuotaService {
               }
               const pastWarmup = Date.now() - attachedAt > 1200;
               for (const line of lines) {
+                if (
+                  !line.includes('"id":"init-graft"') &&
+                  !line.includes('"id":"charlier-') &&
+                  line.includes('"method":"initialize"')
+                ) {
+                  try {
+                    const parsed = JSON.parse(line);
+                    if (parsed?.method === 'initialize' && parsed?.params && typeof parsed.params === 'object') {
+                      this.capturedInitializeParams = parsed.params;
+                    }
+                  } catch {}
+                }
+                if (
+                  !line.includes('"id":"charlier-') &&
+                  (line.includes('"method":"turn/start"') ||
+                    line.includes('"method":"turn/steer"') ||
+                    line.includes('"method":"turn/addUserMessage"') ||
+                    line.includes('"method":"thread/resume"') ||
+                    line.includes('"method":"thread/goal/set"') ||
+                    line.includes('"method":"review/start"') ||
+                    line.includes('"method":"thread/unsubscribe"') ||
+                    line.includes('"method":"thread/archive"') ||
+                    line.includes('"method":"thread/delete"'))
+                ) {
+                  try {
+                    const parsed = JSON.parse(line);
+                    const method = parsed?.method;
+                    const tid = parsed?.params?.threadId;
+                    if (
+                      method === 'thread/unsubscribe' ||
+                      method === 'thread/archive' ||
+                      method === 'thread/delete'
+                    ) {
+                      this.removeObservedThreadId(tid);
+                    } else if (tid) {
+                      this.trackObservedThreadId(tid);
+                    }
+                  } catch {}
+                }
                 if (
                   !line.includes('"id":"charlier-') &&
                   (line.includes('"method":"turn/start"') ||
@@ -1610,9 +2176,14 @@ export class CodexQuotaService {
    * child process automatically without ever revoking tokens server-side.
    */
   public async syncExternalAuthChange(codexVault: CodexVault): Promise<void> {
-    if (this.isHotSwapping) return;
     const decoded = codexVault.readDecodedActiveAuth();
     const currentKey = this.computeAuthFingerprint(decoded);
+    if (this.isHotSwapping) {
+      if (this.lastSyncedAccountKey !== currentKey) {
+        this.pendingHotSwapMode = decoded ? decoded.authMode : null;
+      }
+      return;
+    }
     if (this.lastSyncedAccountKey !== null && this.lastSyncedAccountKey === currentKey) {
       return;
     }
@@ -1701,11 +2272,13 @@ export class CodexQuotaService {
       const currentChild = this.graftedCurrentChild || rootProc;
       const parser = this.graftedParser;
       const prevStdin = rootProc.stdin;
+      const oldChildStdin = currentChild === rootProc ? prevStdin : currentChild.stdin;
 
       // Install a lightweight FIFO stdin buffer on rootProc immediately so we can pulse the
       // React remount at t=0ms (instant visual transition alongside Cockpit) without dropping
-      // any JSON-RPC requests (`getAuthStatus`, `account/read`, `config/read`) sent while the
-      // replacement `codex app-server` spawns and finishes `initialize`.
+      // any JSON-RPC requests (`getAuthStatus`, `account/read`, `config/read`, `turn/start`,
+      // `thread/goal/set`) sent while the replacement `codex app-server` spawns, finishes
+      // `initialize`, and replays `thread/resume` for previously loaded threads.
       const queuedWrites: Array<{
         chunk: any;
         encoding?: BufferEncoding;
@@ -1716,6 +2289,10 @@ export class CodexQuotaService {
         writable: true,
         destroyed: false,
         writableEnded: false,
+        writableFinished: false,
+        get writableLength() {
+          return queuedWrites.length;
+        },
         write(
           chunk: any,
           encodingOrCb?: BufferEncoding | ((err?: Error | null) => void),
@@ -1724,6 +2301,10 @@ export class CodexQuotaService {
           const encoding = typeof encodingOrCb === 'string' ? encodingOrCb : undefined;
           const callback = typeof encodingOrCb === 'function' ? encodingOrCb : cb;
           if (!stdinBuffered && rootProc.stdin && rootProc.stdin !== bufferedStdin) {
+            if (rootProc.stdin.destroyed) {
+              callback?.(new Error('Codex app-server stdin is destroyed'));
+              return false;
+            }
             return encoding
               ? rootProc.stdin.write(chunk, encoding, callback)
               : rootProc.stdin.write(chunk, callback);
@@ -1731,21 +2312,57 @@ export class CodexQuotaService {
           queuedWrites.push({ chunk, encoding, cb: callback });
           return true;
         },
-        end(cb?: () => void) {
-          cb?.();
+        end(
+          chunkOrCb?: any,
+          encodingOrCb?: BufferEncoding | (() => void),
+          cb?: () => void
+        ) {
+          if (typeof chunkOrCb === 'function') {
+            chunkOrCb();
+          } else {
+            if (chunkOrCb !== undefined && chunkOrCb !== null) {
+              const encoding = typeof encodingOrCb === 'string' ? encodingOrCb : undefined;
+              queuedWrites.push({ chunk: chunkOrCb, encoding });
+            }
+            const doneCb = typeof encodingOrCb === 'function' ? encodingOrCb : cb;
+            doneCb?.();
+          }
           return bufferedStdin;
         },
+        destroy() {
+          // Node.js ChildProcess._handle.onexit calls `this.stdin.destroy()` when `oldPid`
+          // exits on the first hot-swap (`rootProc === currentChild`). Keep bufferedStdin
+          // alive until `newProc.stdin` replaces it so queued writes never drop or crash.
+          return bufferedStdin;
+        },
+        setDefaultEncoding() {
+          return bufferedStdin;
+        },
+        cork() {},
+        uncork() {},
         on() {
           return bufferedStdin;
         },
         once() {
           return bufferedStdin;
         },
+        addListener() {
+          return bufferedStdin;
+        },
+        off() {
+          return bufferedStdin;
+        },
         removeListener() {
+          return bufferedStdin;
+        },
+        removeEventListener() {
           return bufferedStdin;
         },
         removeAllListeners() {
           return bufferedStdin;
+        },
+        emit() {
+          return false;
         }
       };
 
@@ -1764,20 +2381,26 @@ export class CodexQuotaService {
 
       rootProc.stdin = bufferedStdin;
 
-      // Detach currentChild streams & listeners before killing its OS PID
+      // Detach currentChild streams & listeners from parser before querying loaded threads / killing PID
+      let oldChildExited = false;
       try {
         currentChild.removeAllListeners?.('exit');
         currentChild.removeAllListeners?.('close');
         currentChild.removeAllListeners?.('error');
+        currentChild.on?.('error', () => {});
+        currentChild.once?.('exit', () => {
+          oldChildExited = true;
+        });
         currentChild.stdout?.unpipe?.(parser);
         currentChild.stdout?.removeAllListeners?.();
-        currentChild.stdin?.removeAllListeners?.();
         currentChild.stderr?.removeAllListeners?.();
+        // Keep a silent error listener on oldChildStdin through query/destroy so async EPIPE never throws
+        oldChildStdin?.on?.('error', () => {});
       } catch {}
 
-      // Fire the 3-stage `account/updated` remount pulse IMMEDIATELY (concurrently with process
-      // respawn) so the Codex sidebar starts transitioning at ~15ms right alongside Cockpit
-      // instead of sitting frozen while `codex app-server` boots.
+      // Fire the 3-stage `account/updated` remount pulse IMMEDIATELY (concurrently with
+      // loaded-thread discovery and process respawn) so the Codex sidebar starts transitioning
+      // at ~15ms right alongside Cockpit instead of sitting frozen while `codex app-server` boots.
       pulsePromise = (async () => {
         const primeMode: 'chatgpt' | 'apikey' = authMode ?? 'chatgpt';
         parser.write(
@@ -1817,29 +2440,88 @@ export class CodexQuotaService {
       })();
 
       const oldPid = currentChild.pid;
+      let loadedThreadIds: string[] = [];
+      if (authMode === null) {
+        if (this.pendingHotSwapMode === undefined || this.pendingHotSwapMode === null) {
+          this.observedThreadIds.clear();
+        }
+      } else {
+        const canQueryLiveChild =
+          typeof oldPid === 'number' &&
+          oldPid > 0 &&
+          !oldChildExited &&
+          Boolean(currentChild.stdout) &&
+          Boolean(oldChildStdin);
+        const queriedIds = canQueryLiveChild
+          ? await this.queryLoadedThreadsFromChild(currentChild, oldChildStdin)
+          : null;
+        loadedThreadIds =
+          queriedIds !== null ? queriedIds : Array.from(this.observedThreadIds);
+      }
+
+      const isWinShellWrapper =
+        process.platform === 'win32' && /\.(cmd|bat)$/i.test(String(rootProc.spawnfile || ''));
+
       if (typeof oldPid === 'number' && oldPid > 0) {
         try {
-          process.kill(oldPid, 'SIGTERM');
+          oldChildStdin?.removeAllListeners?.();
+          oldChildStdin?.on?.('error', () => {});
+          oldChildStdin?.destroy?.();
         } catch {}
 
-        // Wait up to 180ms across Windows, macOS, and Linux (tight 5ms poll) for the old codex
-        // process to exit so SQLite locks on ~/.codex/state_*.sqlite and .coordination.lock release cleanly.
-        const waitStart = Date.now();
-        let alive = true;
-        while (Date.now() - waitStart < 180) {
+        if (isWinShellWrapper) {
+          // On Windows `.cmd`/`.bat` (`shell: true`), `oldPid` is `cmd.exe`; terminate the
+          // full process tree so grandchild `codex.exe` releases SQLite and writer locks.
+          await new Promise<void>((resolve) => {
+            execFile(
+              'taskkill',
+              ['/PID', String(oldPid), '/T', '/F'],
+              { windowsHide: true, timeout: 1000 },
+              () => resolve()
+            );
+          });
+        } else {
           try {
-            process.kill(oldPid, 0);
-            await new Promise((r) => setTimeout(r, 5));
-          } catch {
-            alive = false;
-            break;
-          }
-        }
-        if (alive) {
-          try {
-            process.kill(oldPid, 'SIGKILL');
-            await new Promise((r) => setTimeout(r, 15));
+            process.kill(oldPid, 'SIGTERM');
           } catch {}
+
+          // Wait for the old codex process to exit so SQLite WAL and ~/.codex/thread-writer-locks
+          // release cleanly (short 5ms poll; exits in ~5-20ms normally, slightly wider grace on POSIX).
+          const termTimeoutMs = process.platform === 'win32' ? 180 : 250;
+          const waitStart = Date.now();
+          let alive = !oldChildExited;
+          while (alive && Date.now() - waitStart < termTimeoutMs) {
+            if (oldChildExited) {
+              alive = false;
+              break;
+            }
+            try {
+              process.kill(oldPid, 0);
+              await new Promise((r) => setTimeout(r, 5));
+            } catch (err: any) {
+              if (!err?.code || err.code === 'ESRCH' || err.code === 'EPERM') {
+                alive = false;
+                break;
+              }
+              await new Promise((r) => setTimeout(r, 5));
+            }
+          }
+          if (alive && !oldChildExited) {
+            try {
+              process.kill(oldPid, 'SIGKILL');
+            } catch {}
+            // Poll briefly after SIGKILL until the OS kernel finishes reaping the process
+            // so replacement `thread/resume` does not collide with stale `thread-writer-locks`.
+            const killWaitStart = Date.now();
+            while (!oldChildExited && Date.now() - killWaitStart < 120) {
+              try {
+                process.kill(oldPid, 0);
+                await new Promise((r) => setTimeout(r, 5));
+              } catch {
+                break;
+              }
+            }
+          }
         }
       }
 
@@ -1899,30 +2581,33 @@ export class CodexQuotaService {
 
       // Complete MCP initialize handshake with newProc and capture any trailing lines
       let trailingLines: string[];
+      let leftoverStdoutBuf: Buffer = Buffer.alloc(0);
       try {
-        trailingLines = await new Promise<string[]>((resolve, reject) => {
-          let buf = '';
+        const initOutcome = await new Promise<{ lines: string[]; leftover: Buffer }>((resolve, reject) => {
+          let rawBuf: Buffer = Buffer.alloc(0);
           const timer = setTimeout(() => {
+            newProc.stdout?.pause?.();
             newProc.stdout?.removeListener('data', onData);
             reject(new Error('Codex app-server initialize handshake timed out'));
           }, 5000);
 
-          const onData = (chunk: Buffer) => {
-            buf += chunk.toString('utf8');
-            const lines = buf.split('\n');
-            // Keep the last partial line in buf
-            buf = lines.pop() ?? '';
+          const onData = (chunk: Buffer | string) => {
+            const chunkBuf = this.chunkToBuffer(chunk);
+            if (chunkBuf.length === 0) return;
+            rawBuf = rawBuf.length > 0 ? Buffer.concat([rawBuf, chunkBuf]) : chunkBuf;
+            const { lines, rest } = this.splitBufferLines(rawBuf);
+            rawBuf = rest;
 
             for (let i = 0; i < lines.length; i++) {
               const line = lines[i];
               if (line.includes('"init-graft"')) {
                 clearTimeout(timer);
+                // Pause synchronously before detaching listener so Node's deferred nextTick
+                // pause cannot drop or reorder stdout bytes arriving before replay/pipe.
+                newProc.stdout?.pause?.();
                 newProc.stdout?.removeListener('data', onData);
                 const remaining = lines.slice(i + 1).filter((l) => l.trim().length > 0);
-                if (buf.trim().length > 0) {
-                  remaining.push(buf);
-                }
-                resolve(remaining);
+                resolve({ lines: remaining, leftover: rawBuf });
                 return;
               }
             }
@@ -1933,24 +2618,12 @@ export class CodexQuotaService {
           const initReq = {
             id: 'init-graft',
             method: 'initialize',
-            params: {
-              clientInfo: {
-                name: 'codex_vscode',
-                title: 'Codex Extension',
-                version: '26.1120.41243'
-              },
-              capabilities: {
-                experimentalApi: true,
-                mcpServerOpenaiFormElicitation: true,
-                requestAttestation: false,
-                extensions: {
-                  'openai/elicitation': { form: {} }
-                }
-              }
-            }
+            params: this.buildInitializeParams()
           };
           newProc.stdin.write(JSON.stringify(initReq) + '\n');
         });
+        trailingLines = initOutcome.lines;
+        leftoverStdoutBuf = initOutcome.leftover;
       } catch (initErr: any) {
         try {
           newProc.kill('SIGKILL');
@@ -1964,12 +2637,44 @@ export class CodexQuotaService {
         newProc.stdin.write(JSON.stringify({ method: 'initialized', params: {} }) + '\n');
       } catch {}
 
+      // Re-hydrate previously loaded threads (prioritizing any active mid-swap queued targets)
+      // into the new `codex app-server`'s in-memory `ThreadManager` BEFORE piping stdout to
+      // `parser` and flushing `queuedWrites`. This keeps `turn/start` on open chats and
+      // `thread/goal/set` on paused/`usage_limited` Goals working without a VS Code reload.
+      if (authMode !== null) {
+        const queuedThreadIds = this.extractThreadIdsFromQueuedWrites(queuedWrites);
+        const threadsToResume = Array.from(new Set([...queuedThreadIds, ...loadedThreadIds]));
+        if (threadsToResume.length > 0) {
+          const replay = await this.replayThreadResumesOnChild(
+            newProc,
+            threadsToResume,
+            leftoverStdoutBuf
+          );
+          if (replay.trailingLines.length > 0) {
+            trailingLines.push(...replay.trailingLines);
+          }
+          leftoverStdoutBuf = replay.leftoverBuf;
+          const permanentDead = new Set(replay.permanentlyFailedIds);
+          const surviving = threadsToResume.filter((tid) => !permanentDead.has(tid));
+          this.observedThreadIds.clear();
+          for (const tid of surviving) {
+            this.trackObservedThreadId(tid);
+          }
+        } else {
+          this.observedThreadIds.clear();
+        }
+      }
+
       // Ensure the immediate visual remount pulse completed before flushing stdout/stdin
       await pulsePromise.catch(() => {});
 
       // Graft newProc onto rootProc and parser, then flush all buffered JSON-RPC requests in FIFO order
       for (const remLine of trailingLines) {
+        this.emitRateLimitsFromLine(remLine);
         parser.write(remLine.endsWith('\n') ? remLine : remLine + '\n');
+      }
+      if (leftoverStdoutBuf.length > 0) {
+        parser.write(leftoverStdoutBuf);
       }
       newProc.stdout.pipe(parser, { end: false });
       this.attachStdoutObserver(newProc);

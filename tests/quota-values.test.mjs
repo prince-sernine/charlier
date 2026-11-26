@@ -2081,3 +2081,234 @@ test('healExpiredAntigravityMetric, inactive >6h weekly horizon classification, 
   });
   assert.equal(fullCodex.codex5hReset, undefined, '100% Codex pool must not display a countdown string');
 });
+
+test('hotSwapCodexAppServer replays thread/loaded/list via thread/resume (with lock retry, noise filter, dynamic init, and passive/queued fallback)', async () => {
+  const { spawn } = nodeRequire('child_process');
+  const { PassThrough, Writable } = nodeRequire('stream');
+
+  // 1. Live outgoing child answers paginated thread/loaded/list; replacement child requires
+  //    thread/resume before turn/start and thread/goal/set continuation, and simulates one
+  //    transient thread-writer-lock error on the goal thread.
+  const oldServerScript = [
+    "setTimeout(() => process.exit(0), 6000).unref();",
+    "let buf='';",
+    "process.stdin.on('data', d => {",
+    "  buf += d.toString('utf8');",
+    "  const lines = buf.split('\\n'); buf = lines.pop() ?? '';",
+    "  for (const l of lines) {",
+    "    if (!l.trim()) continue;",
+    "    const msg = JSON.parse(l);",
+    "    if (msg.method === 'thread/loaded/list') {",
+    "      const cursor = msg.params && msg.params.cursor;",
+    "      if (!cursor) {",
+    "        process.stdout.write(JSON.stringify({ id: msg.id, result: { data: ['thread-chat-1'], nextCursor: 'page-2' } }) + '\\n');",
+    "      } else {",
+    "        process.stdout.write(JSON.stringify({ id: msg.id, result: { data: ['thread-goal-1'], nextCursor: null } }) + '\\n');",
+    "      }",
+    "    }",
+    "  }",
+    "});"
+  ].join('');
+
+  const newServerScript = [
+    "setTimeout(() => process.exit(0), 6000).unref();",
+    "let buf='';",
+    "const loaded = new Set();",
+    "let goalAttempts = 0;",
+    "let initVersion = null;",
+    "process.stdin.on('data', d => {",
+    "  buf += d.toString('utf8');",
+    "  const lines = buf.split('\\n'); buf = lines.pop() ?? '';",
+    "  for (const l of lines) {",
+    "    if (!l.trim()) continue;",
+    "    const msg = JSON.parse(l);",
+    "    if (msg.method === 'initialize') {",
+    "      initVersion = msg.params?.clientInfo?.version || null;",
+    "      process.stdout.write(JSON.stringify({ id: msg.id, result: { userAgent: 'mock' } }) + '\\n');",
+    "      process.stdout.write(JSON.stringify({ method: 'remoteControl/status/changed', params: { status: 'disabled', initVersion } }) + '\\n');",
+    "    } else if (msg.method === 'thread/resume') {",
+    "      const tid = msg.params?.threadId;",
+    "      if (tid === 'thread-goal-1' && goalAttempts === 0) {",
+    "        goalAttempts++;",
+    "        process.stdout.write(JSON.stringify({ id: msg.id, error: { code: -32600, message: 'failed to acquire thread writer lock: thread thread-goal-1 already has an active writer' } }) + '\\n');",
+    "        continue;",
+    "      }",
+    "      loaded.add(tid);",
+    "      process.stdout.write(JSON.stringify({ method: 'thread/status/changed', params: { threadId: tid, status: { type: 'idle' } } }) + '\\n');",
+    "      process.stdout.write(JSON.stringify({ method: 'thread/goal/updated', params: { threadId: tid, goal: { status: 'paused' } } }) + '\\n');",
+    "      process.stdout.write(JSON.stringify({ id: msg.id, result: { thread: { id: tid }, excludeTurns: msg.params?.excludeTurns === true } }) + '\\n');",
+    "    } else if (msg.method === 'turn/start') {",
+    "      const tid = msg.params?.threadId;",
+    "      if (!loaded.has(tid)) {",
+    "        process.stdout.write(JSON.stringify({ id: msg.id, error: { code: -32600, message: 'thread not found: ' + tid } }) + '\\n');",
+    "      } else {",
+    "        process.stdout.write(JSON.stringify({ id: msg.id, result: { ok: true, threadId: tid, initVersion } }) + '\\n');",
+    "      }",
+    "    } else if (msg.method === 'thread/goal/set') {",
+    "      const tid = msg.params?.threadId;",
+    "      process.stdout.write(JSON.stringify({ id: msg.id, result: { goal: { threadId: tid, status: msg.params?.status } } }) + '\\n');",
+    "      if (msg.params?.status === 'active' && loaded.has(tid)) {",
+    "        process.stdout.write(JSON.stringify({ method: 'turn/started', params: { threadId: tid, turn: { id: 'goal-turn-1' } } }) + '\\n');",
+    "      }",
+    "    }",
+    "  }",
+    "});"
+  ].join('');
+
+  const oldChild = spawn(process.execPath, ['-e', oldServerScript], {
+    stdio: ['pipe', 'pipe', 'pipe'],
+    windowsHide: true
+  });
+  const parserLines = [];
+  const parser = new Writable({
+    write(chunk, _enc, cb) {
+      for (const l of chunk.toString('utf8').split('\n')) {
+        if (l.trim()) parserLines.push(l.trim());
+      }
+      cb();
+    }
+  });
+  oldChild.stdout.pipe(parser, { end: false });
+  // Override spawnargs so hotSwapCodexAppServer respawns newServerScript cleanly
+  Object.defineProperty(oldChild, 'spawnargs', {
+    value: [process.execPath, '-e', newServerScript],
+    configurable: true
+  });
+
+  const svc = new codex.CodexQuotaService();
+  svc.graftedRootProc = oldChild;
+  svc.graftedCurrentChild = oldChild;
+  svc.graftedParser = parser;
+  svc.ensureGraftedHandles = () => true;
+  svc.attachStdoutObserver(oldChild);
+
+  // Feed an initialize request through wrapped stdin to test dynamic initialize capture
+  oldChild.stdin.write(
+    JSON.stringify({
+      id: 'ext-init-1',
+      method: 'initialize',
+      params: {
+        clientInfo: { name: 'codex_vscode', title: 'Codex Extension', version: '26.1199.99999' },
+        capabilities: { experimentalApi: true }
+      }
+    }) + '\n'
+  );
+
+  try {
+    const swapPromise = svc.hotSwapCodexAppServer('chatgpt');
+    // Queue a regular chat follow-up AND a Resume Goal RPC during the swap window
+    oldChild.stdin.write(
+      JSON.stringify({ id: 'chat-turn-1', method: 'turn/start', params: { threadId: 'thread-chat-1', input: [] } }) + '\n'
+    );
+    oldChild.stdin.write(
+      JSON.stringify({ id: 'goal-resume-1', method: 'thread/goal/set', params: { threadId: 'thread-goal-1', origin: 'user', status: 'active' } }) + '\n'
+    );
+
+    const swapRes = await swapPromise;
+    assert.equal(swapRes, 'swapped');
+    await new Promise((r) => setTimeout(r, 120));
+
+    assert.ok(
+      parserLines.some((l) => l.includes('"chat-turn-1"') && l.includes('"ok":true') && l.includes('26.1199.99999')),
+      `turn/start on regular chat must succeed after replay with captured initialize version (got: ${parserLines.join(' | ')})`
+    );
+    assert.ok(
+      !parserLines.some((l) => l.includes('thread not found')),
+      'must never return thread not found for previously loaded chat thread'
+    );
+    assert.ok(
+      parserLines.some((l) => l.includes('"method":"turn/started"') && l.includes('thread-goal-1')),
+      'Resume Goal (thread/goal/set active) must trigger turn/started after writer-lock retry + replay'
+    );
+    assert.ok(
+      parserLines.some((l) => l.includes('"method":"remoteControl/status/changed"')),
+      'genuine non-thread server notifications emitted during replay must still reach parser'
+    );
+    assert.equal(
+      parserLines.some((l) => l.includes('charlier-resume-') || l.includes('"method":"thread/goal/updated"')),
+      false,
+      'synthetic charlier-resume responses and pre-pipe thread replay noise must not leak into parser'
+    );
+
+    // 2. Fallback path: unreachable old child (pid=-1) falls back to passive observedThreadIds
+    //    (excluding closed threads) + threads referenced in queuedWrites, and authMode=null skips replay.
+    const parser2Lines = [];
+    const parser2 = new Writable({
+      write(chunk, _enc, cb) {
+        for (const l of chunk.toString('utf8').split('\n')) {
+          if (l.trim()) parser2Lines.push(l.trim());
+        }
+        cb();
+      }
+    });
+    const fakeDeadProc = {
+      pid: -1,
+      spawnfile: process.execPath,
+      spawnargs: [process.execPath, '-e', newServerScript],
+      stdout: new PassThrough(),
+      stdin: new PassThrough(),
+      stderr: new PassThrough(),
+      removeAllListeners() {},
+      kill() { return true; }
+    };
+    const svc2 = new codex.CodexQuotaService();
+    svc2.graftedRootProc = fakeDeadProc;
+    svc2.graftedCurrentChild = fakeDeadProc;
+    svc2.graftedParser = parser2;
+    svc2.ensureGraftedHandles = () => true;
+    svc2.attachStdoutObserver(fakeDeadProc);
+    fakeDeadProc.stdout.write(JSON.stringify({ method: 'thread/started', params: { thread: { id: 'thread-passive-1' } } }) + '\n');
+    fakeDeadProc.stdout.write(JSON.stringify({ method: 'thread/started', params: { thread: { id: 'thread-closed-1' } } }) + '\n');
+    fakeDeadProc.stdout.write(JSON.stringify({ method: 'thread/closed', params: { threadId: 'thread-closed-1' } }) + '\n');
+    await new Promise((r) => setTimeout(r, 20));
+
+    const swap2 = svc2.hotSwapCodexAppServer('chatgpt');
+    fakeDeadProc.stdin.write(
+      JSON.stringify({ id: 'queued-only-1', method: 'turn/start', params: { threadId: 'thread-queued-1', input: [] } }) + '\n'
+    );
+    fakeDeadProc.stdin.write(
+      JSON.stringify({ id: 'passive-1', method: 'turn/start', params: { threadId: 'thread-passive-1', input: [] } }) + '\n'
+    );
+    assert.equal(await swap2, 'swapped');
+    await new Promise((r) => setTimeout(r, 120));
+    assert.ok(
+      parser2Lines.some((l) => l.includes('"passive-1"') && l.includes('"ok":true')),
+      'passive observedThreadIds fallback must replay surviving threads when old child is unreachable'
+    );
+    assert.ok(
+      parser2Lines.some((l) => l.includes('"queued-only-1"') && l.includes('"ok":true')),
+      'queuedWrites threadId discovery must resume threads targeted mid-swap'
+    );
+    assert.equal(
+      svc2.observedThreadIds.has('thread-closed-1'),
+      false,
+      'closed threads must be pruned from observedThreadIds'
+    );
+
+    // authMode === null (+ Add Account) must clear observedThreadIds and skip thread/resume
+    assert.equal(await svc2.hotSwapCodexAppServer(null), 'swapped');
+    assert.equal(svc2.observedThreadIds.size, 0, 'sign-out hot-swap must clear observedThreadIds');
+    try { svc2.graftedCurrentChild?.kill?.('SIGKILL'); } catch {}
+
+    // 3. Hardening invariants: raw UTF-8 Buffer splitting (no \uFFFD), Uint8Array + trailing-no-LF
+    //    queuedWrites extraction, and default buildInitializeParams version fallback
+    const utf8Emoji = 'charlier-utf8-\u{1F680}-ok';
+    const rawLine = Buffer.from(utf8Emoji + '\n', 'utf8');
+    const splitA = svc2.splitBufferLines(rawLine.subarray(0, 16));
+    assert.equal(splitA.lines.length, 0);
+    const splitB = svc2.splitBufferLines(Buffer.concat([splitA.rest, rawLine.subarray(16)]));
+    assert.deepEqual(splitB.lines, [utf8Emoji], 'raw Buffer 0x0a splitting must never corrupt split multi-byte UTF-8');
+
+    const extractedQueued = svc2.extractThreadIdsFromQueuedWrites([
+      { chunk: new Uint8Array(Buffer.from(JSON.stringify({ id: 'q1', method: 'thread/read', params: { threadId: 'tid-uint8' } }) + '\n')) },
+      { chunk: JSON.stringify({ id: 'q2', method: 'turn/interrupt', params: { threadId: 'tid-no-lf' } }) }
+    ]);
+    assert.deepEqual(extractedQueued, ['tid-uint8', 'tid-no-lf'], 'extractThreadIdsFromQueuedWrites must parse Uint8Array chunks and trailing lines without newline');
+
+    const fallbackInit = svc2.buildInitializeParams();
+    assert.equal(fallbackInit.clientInfo.version, '26.1120.50957', 'buildInitializeParams must default to current openai.chatgpt fallback when uncaptured');
+  } finally {
+    try { oldChild.kill('SIGKILL'); } catch {}
+    try { svc.graftedCurrentChild?.kill?.('SIGKILL'); } catch {}
+  }
+});

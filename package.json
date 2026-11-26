@@ -2,7 +2,7 @@
   "name": "charlier",
   "displayName": "Charlier: Antigravity & Codex Account Switcher",
   "description": "Run multiple Antigravity & Codex CLI accounts in parallel and hot-swap IDE sessions in <100ms without restarting the VS Code Extension Host. Live quota cockpit, zero npm deps.",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "publisher": "Sernine",
   "license": "SEE LICENSE IN LICENSE",
   "repository": {
@@ -145,7 +145,7 @@
         "charlier.codexSurgicalReload": {
           "type": "boolean",
           "default": true,
-          "description": "When switching OpenAI Codex accounts, trigger an immediate visual handoff (~50ms) and buffered stdio graft on codex app-server in memory without restarting the Extension Host."
+          "description": "When switching OpenAI Codex accounts, trigger an immediate visual handoff (~50ms), buffered stdio graft, and in-memory thread/goal replay on codex app-server without restarting the Extension Host."
         },
         "charlier.showStatusBarQuota": {
           "type": "boolean",
